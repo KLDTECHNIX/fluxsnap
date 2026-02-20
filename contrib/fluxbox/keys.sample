@@ -1,0 +1,13 @@
+# Fluxsnap integration for ~/.fluxbox/keys
+# Restart fluxbox after editing keys: fluxbox-remote reconfigure
+
+# Start/stop daemon
+Mod4 F9 :ExecCommand pkill -x fluxsnap; fluxsnap &
+Mod4 Shift F9 :ExecCommand pkill -x fluxsnap
+
+# Profile quick-switching
+Mod4 F10 :ExecCommand fluxsnap-profile default
+Mod4 Shift F10 :ExecCommand fluxsnap-profile left-main-right-stack
+
+# Edit active config
+Mod4 F11 :ExecCommand xterm -e sh -lc '${EDITOR:-vi} ~/.config/fluxsnap/config'
