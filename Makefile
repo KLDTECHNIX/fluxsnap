@@ -10,15 +10,13 @@ CFLAGS += -Wall -Wextra -pedantic -std=c11
 
 X11_CFLAGS != $(PKG_CONFIG) --cflags x11 xext 2>/dev/null || echo -I$(PREFIX)/include
 X11_LIBS != $(PKG_CONFIG) --libs x11 xext 2>/dev/null || echo -L$(PREFIX)/lib -lX11 -lXext
-XINERAMA_ENABLED != $(PKG_CONFIG) --exists xinerama 2>/dev/null && echo 1 || echo 0
+XINERAMA_DEF != $(PKG_CONFIG) --exists xinerama 2>/dev/null && echo -DHAVE_XINERAMA || echo
 XINERAMA_CFLAGS != $(PKG_CONFIG) --cflags xinerama 2>/dev/null || echo
 XINERAMA_LIBS != $(PKG_CONFIG) --libs xinerama 2>/dev/null || echo
 
-ifeq ($(XINERAMA_ENABLED),1)
-CFLAGS += -DHAVE_XINERAMA
+CFLAGS += $(XINERAMA_DEF)
 X11_CFLAGS += $(XINERAMA_CFLAGS)
 X11_LIBS += $(XINERAMA_LIBS)
-endif
 
 PROG = fluxsnap
 SRCS = src/fluxsnap.c
