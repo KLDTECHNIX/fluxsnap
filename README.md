@@ -102,21 +102,11 @@ fluxsnap -c ./configs/left-main-right-stack.conf
 Installed files:
 
 - `/usr/local/bin/fluxsnap-profile`
-- `/usr/local/bin/fluxsnap-fluxbox-install`
 - `/usr/local/share/examples/fluxsnap/fluxbox/menu.inc`
 - `/usr/local/share/examples/fluxsnap/fluxbox/keys.sample`
 - `/usr/local/share/examples/fluxsnap/fluxbox/init.sample`
 
-Quick setup (recommended):
-
-```sh
-fluxsnap-fluxbox-install
-```
-
-That command merges/install snippets into `~/.fluxbox/menu`, `~/.fluxbox/keys`, and
-`~/.fluxbox/init`, creates backups (`*.bak.<timestamp>`), reloads Fluxbox, and starts `fluxsnap`.
-
-Manual setup (if you prefer):
+Recommended setup:
 
 1. Merge `keys.sample` into `~/.fluxbox/keys` for daemon/profile shortcuts.
 2. Merge `menu.inc` into `~/.fluxbox/menu` for menu-driven config/profile actions.

@@ -23,7 +23,6 @@ install: $(PROG)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(PROG) $(DESTDIR)$(BINDIR)/$(PROG)
 	install -m 0755 contrib/fluxbox/fluxsnap-profile.sh $(DESTDIR)$(BINDIR)/fluxsnap-profile
-	install -m 0755 contrib/fluxbox/install-user.sh $(DESTDIR)$(BINDIR)/fluxsnap-fluxbox-install
 	install -d $(DESTDIR)$(ETCDIR)
 	install -m 0644 fluxsnap.conf $(DESTDIR)$(ETCDIR)/fluxsnap.conf.sample
 	install -d $(DESTDIR)$(MANDIR)/man1
@@ -36,12 +35,10 @@ install: $(PROG)
 	install -m 0644 contrib/fluxbox/menu.inc $(DESTDIR)$(EXAMPLESDIR)/fluxbox/menu.inc
 	install -m 0644 contrib/fluxbox/keys.sample $(DESTDIR)$(EXAMPLESDIR)/fluxbox/keys.sample
 	install -m 0644 contrib/fluxbox/init.sample $(DESTDIR)$(EXAMPLESDIR)/fluxbox/init.sample
-	install -m 0755 contrib/fluxbox/install-user.sh $(DESTDIR)$(EXAMPLESDIR)/fluxbox/install-user.sh
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(PROG)
 	rm -f $(DESTDIR)$(BINDIR)/fluxsnap-profile
-	rm -f $(DESTDIR)$(BINDIR)/fluxsnap-fluxbox-install
 	rm -f $(DESTDIR)$(ETCDIR)/fluxsnap.conf.sample
 	rm -f $(DESTDIR)$(MANDIR)/man1/fluxsnap.1
 	rm -rf $(DESTDIR)$(EXAMPLESDIR)
