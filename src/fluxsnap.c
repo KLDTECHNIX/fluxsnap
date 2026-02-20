@@ -61,6 +61,14 @@ typedef struct {
 } ZoneBucket;
 
 typedef struct {
+    int left, right, top, bottom;
+    int left_start_y, left_end_y;
+    int right_start_y, right_end_y;
+    int top_start_x, top_end_x;
+    int bottom_start_x, bottom_end_x;
+} Strut;
+
+typedef struct {
     Display *dpy;
     int screen;
     Window root;
@@ -74,6 +82,8 @@ typedef struct {
     Atom atom_net_wm_state;
     Atom atom_net_wm_state_max_horz;
     Atom atom_net_wm_state_max_vert;
+    Atom atom_net_wm_strut;
+    Atom atom_net_wm_strut_partial;
     Config config;
 } App;
 
@@ -261,6 +271,123 @@ static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned
     *out = (unsigned long *)prop;
     *count = nitems;
     return true;
+}
+
+static bool window_has_atom(App *app, Window w, Atom prop, Atom expected);
+
+/* Read _NET_WM_STRUT_PARTIAL (12 values) or _NET_WM_STRUT (4 values) from a
+ * dock window.  Returns false if neither property exists or all values are 0. */
+static bool get_window_strut(App *app, Window w, Strut *out) {
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
+
+    if (XGetWindowProperty(app->dpy, w, app->atom_net_wm_strut_partial,
+                           0, 12, False, XA_CARDINAL,
+                           &actual_type, &actual_format, &nitems, &bytes_after,
+                           &data) == Success
+        && data && actual_format == 32 && nitems == 12) {
+        unsigned long *v = (unsigned long *)data;
+        *out = (Strut){
+            (int)v[0],  (int)v[1],  (int)v[2],  (int)v[3],
+            (int)v[4],  (int)v[5],  (int)v[6],  (int)v[7],
+            (int)v[8],  (int)v[9],  (int)v[10], (int)v[11],
+        };
+        XFree(data);
+        return out->left || out->right || out->top || out->bottom;
+    }
+    if (data) { XFree(data); data = NULL; }
+
+    /* Fall back to the older _NET_WM_STRUT (no start/end coordinates). */
+    if (XGetWindowProperty(app->dpy, w, app->atom_net_wm_strut,
+                           0, 4, False, XA_CARDINAL,
+                           &actual_type, &actual_format, &nitems, &bytes_after,
+                           &data) == Success
+        && data && actual_format == 32 && nitems >= 4) {
+        unsigned long *v = (unsigned long *)data;
+        int sw = DisplayWidth(app->dpy, app->screen);
+        int sh = DisplayHeight(app->dpy, app->screen);
+        *out = (Strut){
+            (int)v[0], (int)v[1], (int)v[2], (int)v[3],
+            0, sh - 1, 0, sh - 1,
+            0, sw - 1, 0, sw - 1,
+        };
+        XFree(data);
+        return out->left || out->right || out->top || out->bottom;
+    }
+    if (data) XFree(data);
+    return false;
+}
+
+/* Clip a single monitor rect so it does not overlap the reserved area
+ * described by one dock window's strut. */
+static void apply_strut_to_monitor(Rect *mon, const Strut *s, int sw, int sh) {
+    int mx2 = mon->x + mon->width;
+    int my2 = mon->y + mon->height;
+
+    /* Left strut: reserved columns x=[0, left-1], rows=[left_start_y, left_end_y] */
+    if (s->left > 0 && mon->x < s->left
+        && my2 > s->left_start_y && mon->y <= s->left_end_y) {
+        int new_x = s->left;
+        mon->width -= (new_x - mon->x);
+        mon->x = new_x;
+        if (mon->width < 0) mon->width = 0;
+    }
+
+    /* Right strut: reserved columns x=[sw-right, sw-1], rows=[right_start_y, right_end_y] */
+    if (s->right > 0 && mx2 > sw - s->right
+        && my2 > s->right_start_y && mon->y <= s->right_end_y) {
+        mon->width = (sw - s->right) - mon->x;
+        if (mon->width < 0) mon->width = 0;
+    }
+
+    /* Top strut: reserved rows y=[0, top-1], cols=[top_start_x, top_end_x] */
+    if (s->top > 0 && mon->y < s->top
+        && mx2 > s->top_start_x && mon->x <= s->top_end_x) {
+        int new_y = s->top;
+        mon->height -= (new_y - mon->y);
+        mon->y = new_y;
+        if (mon->height < 0) mon->height = 0;
+    }
+
+    /* Bottom strut: reserved rows y=[sh-bottom, sh-1], cols=[bottom_start_x, bottom_end_x] */
+    if (s->bottom > 0 && my2 > sh - s->bottom
+        && mx2 > s->bottom_start_x && mon->x <= s->bottom_end_x) {
+        mon->height = (sh - s->bottom) - mon->y;
+        if (mon->height < 0) mon->height = 0;
+    }
+}
+
+/* Walk all root-window children, find docks, and clip every monitor rect to
+ * exclude their reserved strut areas.  This handles cases where the WM has not
+ * updated _NET_WORKAREA to reflect the toolbar position. */
+static void apply_dock_struts(App *app, Rect mons[], int nmon) {
+    int sw = DisplayWidth(app->dpy, app->screen);
+    int sh = DisplayHeight(app->dpy, app->screen);
+
+    Window root_ret, parent_ret;
+    Window *children = NULL;
+    unsigned int nchildren = 0;
+
+    if (!XQueryTree(app->dpy, app->root, &root_ret, &parent_ret, &children, &nchildren))
+        return;
+
+    for (unsigned int i = 0; i < nchildren; i++) {
+        if (!window_has_atom(app, children[i],
+                             app->atom_net_wm_window_type,
+                             app->atom_net_wm_window_type_dock))
+            continue;
+
+        Strut strut;
+        if (!get_window_strut(app, children[i], &strut))
+            continue;
+
+        for (int m = 0; m < nmon; m++)
+            apply_strut_to_monitor(&mons[m], &strut, sw, sh);
+    }
+
+    if (children) XFree(children);
 }
 
 static Rect get_workarea(App *app) {
@@ -589,6 +716,7 @@ static void tile_all_windows(App *app) {
     Rect wa = get_workarea(app);
     Rect mons[MAX_MONITORS] = {0};
     int nmon = get_visible_monitors(app, wa, mons);
+    apply_dock_struts(app, mons, nmon);
 
     for (int m = 0; m < nmon; m++) {
         ZoneBucket buckets[MAX_ZONES] = {0};
@@ -688,6 +816,8 @@ int main(int argc, char **argv) {
     app.atom_net_wm_state = XInternAtom(app.dpy, "_NET_WM_STATE", False);
     app.atom_net_wm_state_max_horz = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
     app.atom_net_wm_state_max_vert = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+    app.atom_net_wm_strut = XInternAtom(app.dpy, "_NET_WM_STRUT", False);
+    app.atom_net_wm_strut_partial = XInternAtom(app.dpy, "_NET_WM_STRUT_PARTIAL", False);
 
     XSelectInput(app.dpy, app.root, SubstructureNotifyMask | KeyPressMask);
     if (!grab_hotkey(&app)) {
