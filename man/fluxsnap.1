@@ -1,0 +1,92 @@
+.Dd February 20, 2026
+.Dt FLUXSNAP 1
+.Os
+.Sh NAME
+.Nm fluxsnap
+.Nd Windows-style snap assist for Fluxbox on X11
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar config
+.Sh DESCRIPTION
+.Nm
+runs as a lightweight X11 helper for snapping windows while dragging.
+When the configured modifier key is held and a window is dragged with the configured mouse button,
+a snap preview appears.
+Releasing the drag applies the snap layout.
+.Pp
+Supported snap zones:
+.Bl -bullet -compact
+.It
+Left / right half
+.It
+Top-left, top-right, bottom-left, bottom-right quarters
+.It
+Top-center maximize
+.It
+Top-left and top-right split shortcuts
+.El
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl c Ar config
+Path to a configuration file.
+.It Fl h
+Show usage help.
+.El
+.Sh CONFIGURATION
+The config file uses
+.Ar key=value
+syntax.
+.Pp
+Default lookup order:
+.Bl -enum -compact
+.It
+.Pa $XDG_CONFIG_HOME/fluxsnap/config
+.It
+.Pa ~/.config/fluxsnap/config
+.It
+.Pa /usr/local/etc/fluxsnap.conf
+.El
+.Pp
+Supported keys:
+.Bl -tag -width mouse_button
+.It Ic modifier
+Super, Mod4, Alt, Mod1, Ctrl, Control, or Shift.
+.It Ic mouse_button
+Mouse button number (1 to 5).
+.It Ic edge_threshold
+Pixels near screen edges used to trigger edge snapping.
+.It Ic top_band
+Pixels from top edge used as top snap band.
+.It Ic gap
+Outer gap in pixels for snapped windows.
+.El
+.Sh INSTALLATION
+Install required dependencies first:
+.Bd -literal -offset indent
+doas pkg install libX11 pkgconf
+.Ed
+.Pp
+For FreeBSD-style local install:
+.Bd -literal -offset indent
+make
+doas make install
+.Ed
+.Pp
+This installs:
+.Bl -bullet -compact
+.It
+.Pa /usr/local/bin/fluxsnap
+.It
+.Pa /usr/local/etc/fluxsnap.conf.sample
+.It
+.Pa /usr/local/man/man1/fluxsnap.1
+.El
+.Sh EXAMPLES
+Start from Fluxbox startup script:
+.Bd -literal -offset indent
+fluxsnap &
+.Ed
+.Sh SEE ALSO
+.Xr fluxbox 1
+.Sh AUTHORS
+Written for Fluxbox/X11 snapping workflows.
