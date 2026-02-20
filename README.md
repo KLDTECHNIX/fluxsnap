@@ -1,23 +1,31 @@
 # fluxsnap
 
-`fluxsnap` is an X11 helper for Fluxbox that does keyboard-triggered smart tiling.
+`fluxsnap` is an X11 helper for Fluxbox that provides keyboard-triggered smart tiling.
 
-## New workflow
+## How it works
 
-1. Press the configured hotkey (default: `Super+Space`).
-2. All open normal windows are tiled evenly in 3 columns with configured gaps.
-3. Click any tiled window to open a quick placement menu (`Left`, `Middle`, `Right`).
-4. `fluxsnap` remembers that preference and keeps future layouts stacked intelligently.
-5. New apps (for example Firefox) are auto-placed and the layout rebalances.
+1. Press your configured hotkey (default: `Super+Space`).
+2. `fluxsnap` tiles all normal windows evenly across 3 columns with gaps.
+3. Click any tiled window to choose `Left`, `Middle`, or `Right` from the quick placement menu.
+4. That window’s column preference is remembered for future tiling passes.
+5. Newly opened windows are automatically tiled and balanced into the layout.
 
-Workarea (`_NET_WORKAREA`) is used, so Fluxbox toolbar/dock reserved space is respected.
+`fluxsnap` uses EWMH `_NET_WORKAREA`, so Fluxbox toolbar/slit/dock reserved space is respected.
+When Xinerama is available, layouts are constrained per-monitor so windows stay inside visible monitor bounds.
 
 ## Build
 
-Install X11 headers/libraries and pkgconf before building:
+Install dependencies on FreeBSD:
 
 ```sh
 doas pkg install libX11 pkgconf
+# optional (recommended for strict multi-monitor bounds):
+doas pkg install libXinerama
+```
+
+Build:
+
+```sh
 make
 ```
 
@@ -27,9 +35,17 @@ make
 doas make install
 ```
 
+Installed highlights:
+
+- `/usr/local/bin/fluxsnap`
+- `/usr/local/bin/fluxsnap-profile`
+- `/usr/local/bin/fluxsnap-fluxbox-install`
+- `/usr/local/etc/fluxsnap.conf.sample`
+- `/usr/local/share/examples/fluxsnap/*`
+
 ## Configuration
 
-Config lookup order:
+Lookup order:
 
 - `$XDG_CONFIG_HOME/fluxsnap/config`
 - `~/.config/fluxsnap/config`
@@ -43,15 +59,30 @@ hotkey=space
 gap=16
 ```
 
+Supported keys:
+
+- `modifier`: `Super|Mod4`, `Alt|Mod1`, `Ctrl|Control`, `Shift`
+- `hotkey`: X keysym string (examples: `space`, `F12`, `Return`)
+- `gap`: pixels around and between tiled windows
+
 ## Fluxbox integration
 
-Run this once after install:
+Run once after install:
 
 ```sh
 fluxsnap-fluxbox-install
 ```
 
-It merges menu/keys/init snippets into your `~/.fluxbox/*`, reloads Fluxbox, and starts `fluxsnap`.
+This merges shipped snippets into your user Fluxbox files (`~/.fluxbox/menu`, `~/.fluxbox/keys`, `~/.fluxbox/init`), creates backups, reloads Fluxbox, and starts `fluxsnap`.
+
+## Profiles
+
+Use profile helper to apply a preset config and restart `fluxsnap`:
+
+```sh
+fluxsnap-profile default
+fluxsnap-profile left-main-right-stack
+```
 
 ## Run manually
 
@@ -59,8 +90,13 @@ It merges menu/keys/init snippets into your `~/.fluxbox/*`, reloads Fluxbox, and
 fluxsnap
 ```
 
-
 ## Troubleshooting
 
-If startup fails with `BadAccess` / `X_GrabKey`, that means another program already owns your hotkey.
-Pick a different `modifier`/`hotkey` in `~/.config/fluxsnap/config` or unbind the key in Fluxbox.
+### `BadAccess` / `X_GrabKey` on startup
+
+Another process already owns your configured hotkey (commonly Fluxbox or a hotkey daemon).
+
+Fix by either:
+
+- changing `modifier` / `hotkey` in `~/.config/fluxsnap/config`, or
+- unbinding the conflicting key in Fluxbox / your hotkey daemon.

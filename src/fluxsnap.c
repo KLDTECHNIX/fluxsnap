@@ -3,6 +3,9 @@
 #include <X11/keysym.h>
 #include <X11/Xutil.h>
 #include <X11/XKBlib.h>
+#ifdef HAVE_XINERAMA
+#include <X11/extensions/Xinerama.h>
+#endif
 #include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
@@ -47,6 +50,14 @@ typedef struct {
     Window w;
     int preferred_col; /* -1 = auto */
 } Pref;
+
+
+typedef struct {
+    Rect area;
+    Window windows[MAX_MANAGED];
+    int count;
+} MonitorBucket;
+
 
 typedef struct {
     Display *dpy;
@@ -349,6 +360,75 @@ static void apply_rect(App *app, Window w, const Rect *r) {
     XMoveResizeWindow(app->dpy, w, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
 }
 
+
+
+#ifdef HAVE_XINERAMA
+static Rect rect_intersection(const Rect *a, const Rect *b) {
+    int x1 = (a->x > b->x) ? a->x : b->x;
+    int y1 = (a->y > b->y) ? a->y : b->y;
+    int x2 = ((a->x + a->width) < (b->x + b->width)) ? (a->x + a->width) : (b->x + b->width);
+    int y2 = ((a->y + a->height) < (b->y + b->height)) ? (a->y + a->height) : (b->y + b->height);
+
+    if (x2 <= x1 || y2 <= y1) return (Rect){0};
+    return (Rect){x1, y1, x2 - x1, y2 - y1, true};
+}
+#endif
+
+static int monitor_index_for_point(const Rect monitors[], int nmon, int x, int y) {
+    for (int i = 0; i < nmon; i++) {
+        if (!monitors[i].valid) continue;
+        if (x >= monitors[i].x && x < monitors[i].x + monitors[i].width &&
+            y >= monitors[i].y && y < monitors[i].y + monitors[i].height) {
+            return i;
+        }
+    }
+
+    int best = 0;
+    long best_dist = LONG_MAX;
+    for (int i = 0; i < nmon; i++) {
+        if (!monitors[i].valid) continue;
+        int cx = monitors[i].x + monitors[i].width / 2;
+        int cy = monitors[i].y + monitors[i].height / 2;
+        long dx = (long)x - cx;
+        long dy = (long)y - cy;
+        long d = dx * dx + dy * dy;
+        if (d < best_dist) {
+            best_dist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+static int get_visible_monitors(App *app, Rect workarea, Rect out[MAX_MANAGED]) {
+    int n = 0;
+
+#ifndef HAVE_XINERAMA
+    (void)app;
+#else
+    int evb, erb;
+    if (XineramaQueryExtension(app->dpy, &evb, &erb) && XineramaIsActive(app->dpy)) {
+        int xcount = 0;
+        XineramaScreenInfo *xscreens = XineramaQueryScreens(app->dpy, &xcount);
+        if (xscreens && xcount > 0) {
+            for (int i = 0; i < xcount && n < MAX_MANAGED; i++) {
+                Rect mon = {xscreens[i].x_org, xscreens[i].y_org, xscreens[i].width, xscreens[i].height, true};
+                Rect clipped = rect_intersection(&workarea, &mon);
+                if (clipped.valid) out[n++] = clipped;
+            }
+            XFree(xscreens);
+        }
+    }
+#endif
+
+    if (n == 0) {
+        out[0] = workarea;
+        n = 1;
+    }
+    return n;
+}
+
+
 static int load_client_list(App *app, Window out[MAX_MANAGED]) {
     Atom actual_type;
     int actual_format;
@@ -387,48 +467,77 @@ static void tile_all_windows(App *app) {
     if (count <= 0) return;
 
     Rect wa = get_workarea(app);
+    Rect monitors[MAX_MANAGED] = {0};
+    int nmon = get_visible_monitors(app, wa, monitors);
+
+    MonitorBucket buckets[MAX_MANAGED] = {0};
+    for (int m = 0; m < nmon; m++) {
+        buckets[m].area = monitors[m];
+    }
+
+    for (int i = 0; i < count; i++) {
+        XWindowAttributes attrs;
+        int mon = 0;
+        if (XGetWindowAttributes(app->dpy, windows[i], &attrs)) {
+            int cx = attrs.x + attrs.width / 2;
+            int cy = attrs.y + attrs.height / 2;
+            mon = monitor_index_for_point(monitors, nmon, cx, cy);
+        }
+
+        if (buckets[mon].count < MAX_MANAGED) {
+            buckets[mon].windows[buckets[mon].count++] = windows[i];
+        }
+    }
+
     int g = app->config.gap;
     int inner = g;
 
-    int usable_w = wa.width - (2 * g) - (2 * inner);
-    if (usable_w < 3) usable_w = 3;
+    for (int m = 0; m < nmon; m++) {
+        Rect area = buckets[m].area;
+        int bcount = buckets[m].count;
+        if (!area.valid || bcount == 0) continue;
 
-    int col_w[3] = {usable_w / 3, usable_w / 3, usable_w - (usable_w / 3) * 2};
-    int col_x[3];
-    col_x[0] = wa.x + g;
-    col_x[1] = col_x[0] + col_w[0] + inner;
-    col_x[2] = col_x[1] + col_w[1] + inner;
+        int usable_w = area.width - (2 * g) - (2 * inner);
+        if (usable_w < 3) usable_w = 3;
 
-    Window cols[3][MAX_MANAGED];
-    int ncol[3] = {0, 0, 0};
+        int col_w[3] = {usable_w / 3, usable_w / 3, usable_w - (usable_w / 3) * 2};
+        int col_x[3];
+        col_x[0] = area.x + g;
+        col_x[1] = col_x[0] + col_w[0] + inner;
+        col_x[2] = col_x[1] + col_w[1] + inner;
 
-    for (int i = 0; i < count; i++) {
-        int pref = get_pref_col(app, windows[i]);
-        int target_col = pref;
-        if (target_col < 0 || target_col > 2) {
-            target_col = 0;
-            if (ncol[1] < ncol[target_col]) target_col = 1;
-            if (ncol[2] < ncol[target_col]) target_col = 2;
+        Window cols[3][MAX_MANAGED];
+        int ncol[3] = {0, 0, 0};
+
+        for (int i = 0; i < bcount; i++) {
+            Window w = buckets[m].windows[i];
+            int pref = get_pref_col(app, w);
+            int target_col = pref;
+            if (target_col < 0 || target_col > 2) {
+                target_col = 0;
+                if (ncol[1] < ncol[target_col]) target_col = 1;
+                if (ncol[2] < ncol[target_col]) target_col = 2;
+            }
+            cols[target_col][ncol[target_col]++] = w;
         }
-        cols[target_col][ncol[target_col]++] = windows[i];
-    }
 
-    int usable_h_base = wa.height - (2 * g);
-    for (int c = 0; c < 3; c++) {
-        if (ncol[c] == 0) continue;
+        int usable_h_base = area.height - (2 * g);
+        for (int c = 0; c < 3; c++) {
+            if (ncol[c] == 0) continue;
 
-        int usable_h = usable_h_base - ((ncol[c] - 1) * inner);
-        if (usable_h < ncol[c]) usable_h = ncol[c];
+            int usable_h = usable_h_base - ((ncol[c] - 1) * inner);
+            if (usable_h < ncol[c]) usable_h = ncol[c];
 
-        int y = wa.y + g;
-        int base_h = usable_h / ncol[c];
-        int rem = usable_h % ncol[c];
+            int y = area.y + g;
+            int base_h = usable_h / ncol[c];
+            int rem = usable_h % ncol[c];
 
-        for (int i = 0; i < ncol[c]; i++) {
-            int h = base_h + (i < rem ? 1 : 0);
-            Rect r = {col_x[c], y, col_w[c], h, true};
-            apply_rect(app, cols[c][i], &r);
-            y += h + inner;
+            for (int i = 0; i < ncol[c]; i++) {
+                int h = base_h + (i < rem ? 1 : 0);
+                Rect r = {col_x[c], y, col_w[c], h, true};
+                apply_rect(app, cols[c][i], &r);
+                y += h + inner;
+            }
         }
     }
 
