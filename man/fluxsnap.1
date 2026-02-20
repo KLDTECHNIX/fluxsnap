@@ -11,8 +11,11 @@
 .Nm
 runs as a lightweight X11 helper for snapping windows while dragging.
 When the configured modifier key is held and a window is dragged with the configured mouse button,
-the screen is dimmed and a light snap preview appears.
+the screen dims as soon as the modifier is held and a light snap preview appears while dragging.
 Releasing the drag applies the snap layout through EWMH move/resize requests for correct client sizing.
+.Pp
+Snapping is based on the EWMH workarea when available, so docks/panels are respected.
+Gap spacing is applied once between adjacent snapped windows.
 .Pp
 Supported snap zones:
 .Bl -bullet -compact

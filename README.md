@@ -5,10 +5,12 @@
 ## Features
 
 - Modifier+drag snapping (default: `Super` + left mouse drag)
-- Screen-dimming overlay while dragging, with a light snap target preview
+- Screen darkens as soon as the modifier is held, with a light snap target preview while dragging
 - Left/right half snapping
 - Corner quarter snapping
 - Top edge maximize, plus quick left/right split from top band
+- Workarea-aware snapping honors `_NET_WORKAREA` (Fluxbox slit/dock/panels)
+- Gap is applied once between adjacent snapped windows (no double middle gap)
 - Config file for hotkey/button/threshold/gap tuning
 
 ## Build

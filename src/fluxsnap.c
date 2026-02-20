@@ -1,6 +1,8 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/XKBlib.h>
+#include <X11/extensions/shape.h>
 #include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
@@ -29,8 +31,8 @@ typedef struct {
 typedef struct {
     int x;
     int y;
-    unsigned int width;
-    unsigned int height;
+    int width;
+    int height;
     bool valid;
 } Rect;
 
@@ -46,9 +48,12 @@ typedef struct {
     Atom atom_net_wm_state_max_vert;
     Atom atom_net_moveresize_window;
     Atom atom_net_wm_window_opacity;
+    Atom atom_net_workarea;
+    Atom atom_net_current_desktop;
     Config config;
     Window target;
     bool dragging;
+    bool modifier_down;
     Rect current_rect;
 } App;
 
@@ -165,6 +170,13 @@ static void set_window_opacity(App *app, Window w, unsigned long opacity) {
                     1);
 }
 
+static void make_input_passthrough(App *app, Window w) {
+    int shape_ev;
+    int shape_err;
+    if (!XShapeQueryExtension(app->dpy, &shape_ev, &shape_err)) return;
+    XShapeCombineRectangles(app->dpy, w, ShapeInput, 0, 0, NULL, 0, ShapeSet, 0);
+}
+
 static void init_visuals(App *app) {
     XSetWindowAttributes dim_attrs;
     dim_attrs.override_redirect = True;
@@ -206,6 +218,8 @@ static void init_visuals(App *app) {
 
     set_window_opacity(app, app->overlay, OVERLAY_OPACITY);
     set_window_opacity(app, app->preview, PREVIEW_OPACITY);
+    make_input_passthrough(app, app->overlay);
+    make_input_passthrough(app, app->preview);
 }
 
 static bool has_property(App *app, Window w, Atom property) {
@@ -276,45 +290,175 @@ static Window resolve_client_window(App *app, Window w) {
     return w;
 }
 
+static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned long *count) {
+    if (property == None) return false;
+
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems;
+    unsigned long bytes_after;
+    unsigned char *prop = NULL;
+
+    if (XGetWindowProperty(app->dpy,
+                           app->root,
+                           property,
+                           0,
+                           4096,
+                           False,
+                           XA_CARDINAL,
+                           &actual_type,
+                           &actual_format,
+                           &nitems,
+                           &bytes_after,
+                           &prop) != Success) {
+        return false;
+    }
+
+    if (actual_type != XA_CARDINAL || actual_format != 32 || !prop || nitems == 0) {
+        if (prop) XFree(prop);
+        return false;
+    }
+
+    *out = (unsigned long *)prop;
+    *count = nitems;
+    return true;
+}
+
+static Rect get_workarea(App *app) {
+    Rect wa = {
+        .x = 0,
+        .y = 0,
+        .width = DisplayWidth(app->dpy, app->screen),
+        .height = DisplayHeight(app->dpy, app->screen),
+        .valid = true,
+    };
+
+    unsigned long *workareas = NULL;
+    unsigned long wa_count = 0;
+    if (!root_cardinal(app, app->atom_net_workarea, &workareas, &wa_count)) {
+        return wa;
+    }
+
+    unsigned long desktop = 0;
+    unsigned long *desktop_prop = NULL;
+    unsigned long desktop_count = 0;
+    if (root_cardinal(app, app->atom_net_current_desktop, &desktop_prop, &desktop_count)) {
+        desktop = desktop_prop[0];
+        XFree(desktop_prop);
+    }
+
+    unsigned long areas = wa_count / 4;
+    if (areas == 0) {
+        XFree(workareas);
+        return wa;
+    }
+    if (desktop >= areas) desktop = 0;
+
+    unsigned long idx = desktop * 4;
+    wa.x = (int)workareas[idx];
+    wa.y = (int)workareas[idx + 1];
+    wa.width = (int)workareas[idx + 2];
+    wa.height = (int)workareas[idx + 3];
+    XFree(workareas);
+
+    if (wa.width <= 0 || wa.height <= 0) {
+        wa.x = 0;
+        wa.y = 0;
+        wa.width = DisplayWidth(app->dpy, app->screen);
+        wa.height = DisplayHeight(app->dpy, app->screen);
+    }
+
+    return wa;
+}
+
 static void normalize_rect(Rect *r) {
     if (!r->valid) return;
-    if ((int)r->width < 1) r->width = 1;
-    if ((int)r->height < 1) r->height = 1;
+    if (r->width < 1) r->width = 1;
+    if (r->height < 1) r->height = 1;
+}
+
+static Rect rect_full(const Rect *wa, int gap) {
+    Rect r = {
+        .x = wa->x + gap,
+        .y = wa->y + gap,
+        .width = wa->width - (gap * 2),
+        .height = wa->height - (gap * 2),
+        .valid = true,
+    };
+    normalize_rect(&r);
+    return r;
+}
+
+static void split_horizontal(const Rect *wa, int gap, Rect *left, Rect *right) {
+    int inner = gap;
+    int x = wa->x + gap;
+    int y = wa->y + gap;
+    int h = wa->height - (gap * 2);
+    int w = wa->width - (gap * 2) - inner;
+    if (w < 2) w = 2;
+
+    int left_w = w / 2;
+    int right_w = w - left_w;
+
+    *left = (Rect){x, y, left_w, h, true};
+    *right = (Rect){x + left_w + inner, y, right_w, h, true};
+    normalize_rect(left);
+    normalize_rect(right);
+}
+
+static void split_vertical(const Rect *base, int gap, Rect *top, Rect *bottom) {
+    int inner = gap;
+    int h = base->height - inner;
+    if (h < 2) h = 2;
+
+    int top_h = h / 2;
+    int bottom_h = h - top_h;
+
+    *top = (Rect){base->x, base->y, base->width, top_h, true};
+    *bottom = (Rect){base->x, base->y + top_h + inner, base->width, bottom_h, true};
+    normalize_rect(top);
+    normalize_rect(bottom);
 }
 
 static Rect compute_snap_rect(App *app, int pointer_x, int pointer_y) {
     Rect r = {0};
-    int sw = DisplayWidth(app->dpy, app->screen);
-    int sh = DisplayHeight(app->dpy, app->screen);
+    Rect wa = get_workarea(app);
     int t = app->config.edge_threshold;
-    int top = app->config.top_band;
+    int top_band = app->config.top_band;
     int gap = app->config.gap;
 
-    bool at_left = pointer_x <= t;
-    bool at_right = pointer_x >= (sw - t);
-    bool at_top = pointer_y <= t;
-    bool at_bottom = pointer_y >= (sh - t);
-    bool in_top_band = pointer_y <= top;
+    bool at_left = pointer_x <= (wa.x + t);
+    bool at_right = pointer_x >= (wa.x + wa.width - t);
+    bool at_top = pointer_y <= (wa.y + t);
+    bool at_bottom = pointer_y >= (wa.y + wa.height - t);
+    bool in_top_band = pointer_y <= (wa.y + top_band);
+
+    Rect left_half, right_half;
+    split_horizontal(&wa, gap, &left_half, &right_half);
+
+    Rect left_top, left_bottom, right_top, right_bottom;
+    split_vertical(&left_half, gap, &left_top, &left_bottom);
+    split_vertical(&right_half, gap, &right_top, &right_bottom);
 
     if (at_left && at_top) {
-        r = (Rect){gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh / 2 - (gap * 2)), true};
+        r = left_top;
     } else if (at_right && at_top) {
-        r = (Rect){sw / 2 + gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh / 2 - (gap * 2)), true};
+        r = right_top;
     } else if (at_left && at_bottom) {
-        r = (Rect){gap, sh / 2 + gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh / 2 - (gap * 2)), true};
+        r = left_bottom;
     } else if (at_right && at_bottom) {
-        r = (Rect){sw / 2 + gap, sh / 2 + gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh / 2 - (gap * 2)), true};
+        r = right_bottom;
     } else if (at_left) {
-        r = (Rect){gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh - (gap * 2)), true};
+        r = left_half;
     } else if (at_right) {
-        r = (Rect){sw / 2 + gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh - (gap * 2)), true};
+        r = right_half;
     } else if (at_top || in_top_band) {
-        if (pointer_x < sw / 3) {
-            r = (Rect){gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh - (gap * 2)), true};
-        } else if (pointer_x > (sw * 2) / 3) {
-            r = (Rect){sw / 2 + gap, gap, (unsigned int)(sw / 2 - (gap * 2)), (unsigned int)(sh - (gap * 2)), true};
+        if (pointer_x < (wa.x + wa.width / 3)) {
+            r = left_half;
+        } else if (pointer_x > (wa.x + (wa.width * 2) / 3)) {
+            r = right_half;
         } else {
-            r = (Rect){gap, gap, (unsigned int)(sw - (gap * 2)), (unsigned int)(sh - (gap * 2)), true};
+            r = rect_full(&wa, gap);
         }
     }
 
@@ -332,18 +476,22 @@ static void set_overlay_visible(App *app, bool visible) {
         int sh = DisplayHeight(app->dpy, app->screen);
         XMoveResizeWindow(app->dpy, app->overlay, 0, 0, (unsigned int)sw, (unsigned int)sh);
         XMapRaised(app->dpy, app->overlay);
+        if (app->dragging && app->current_rect.valid) {
+            XMapRaised(app->dpy, app->preview);
+        }
     } else {
         XUnmapWindow(app->dpy, app->overlay);
+        XUnmapWindow(app->dpy, app->preview);
     }
 }
 
 static void show_preview(App *app, const Rect *r) {
-    if (!r->valid) {
+    if (!r->valid || !app->modifier_down) {
         XUnmapWindow(app->dpy, app->preview);
         return;
     }
 
-    XMoveResizeWindow(app->dpy, app->preview, r->x, r->y, r->width, r->height);
+    XMoveResizeWindow(app->dpy, app->preview, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
     XMapRaised(app->dpy, app->preview);
 }
 
@@ -380,8 +528,8 @@ static bool apply_snap_via_ewmh(App *app, Window w, const Rect *r) {
     ev.xclient.data.l[0] = (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11);
     ev.xclient.data.l[1] = r->x;
     ev.xclient.data.l[2] = r->y;
-    ev.xclient.data.l[3] = (long)r->width;
-    ev.xclient.data.l[4] = (long)r->height;
+    ev.xclient.data.l[3] = r->width;
+    ev.xclient.data.l[4] = r->height;
 
     Status sent = XSendEvent(app->dpy,
                              app->root,
@@ -396,7 +544,12 @@ static void apply_snap(App *app, const Rect *r) {
 
     clear_maximized_state(app, app->target);
     if (!apply_snap_via_ewmh(app, app->target, r)) {
-        XMoveResizeWindow(app->dpy, app->target, r->x, r->y, r->width, r->height);
+        XMoveResizeWindow(app->dpy,
+                          app->target,
+                          r->x,
+                          r->y,
+                          (unsigned int)r->width,
+                          (unsigned int)r->height);
     }
     XRaiseWindow(app->dpy, app->target);
 }
@@ -415,6 +568,67 @@ static void grab_with_lock_variants(App *app, unsigned int button, unsigned int 
                     None,
                     None);
     }
+}
+
+static size_t modifier_keysyms(unsigned int modmask, KeySym out[8]) {
+    if (modmask == ControlMask) {
+        out[0] = XK_Control_L;
+        out[1] = XK_Control_R;
+        return 2;
+    }
+    if (modmask == ShiftMask) {
+        out[0] = XK_Shift_L;
+        out[1] = XK_Shift_R;
+        return 2;
+    }
+    if (modmask == Mod1Mask) {
+        out[0] = XK_Alt_L;
+        out[1] = XK_Alt_R;
+        out[2] = XK_Meta_L;
+        out[3] = XK_Meta_R;
+        return 4;
+    }
+
+    out[0] = XK_Super_L;
+    out[1] = XK_Super_R;
+    out[2] = XK_Hyper_L;
+    out[3] = XK_Hyper_R;
+    return 4;
+}
+
+static void grab_modifier_keys(App *app, unsigned int modmask) {
+    const unsigned int masks[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
+    KeySym syms[8];
+    size_t nsyms = modifier_keysyms(modmask, syms);
+
+    for (size_t k = 0; k < nsyms; k++) {
+        KeyCode code = XKeysymToKeycode(app->dpy, syms[k]);
+        if (code == 0) continue;
+        for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
+            XGrabKey(app->dpy,
+                     (int)code,
+                     masks[i],
+                     app->root,
+                     True,
+                     GrabModeAsync,
+                     GrabModeAsync);
+        }
+    }
+}
+
+static bool is_modifier_key(App *app, KeyCode code) {
+    KeySym sym = XkbKeycodeToKeysym(app->dpy, code, 0, 0);
+    if (app->config.modifier == ControlMask) {
+        return sym == XK_Control_L || sym == XK_Control_R;
+    }
+    if (app->config.modifier == ShiftMask) {
+        return sym == XK_Shift_L || sym == XK_Shift_R;
+    }
+    if (app->config.modifier == Mod1Mask) {
+        return sym == XK_Alt_L || sym == XK_Alt_R || sym == XK_Meta_L || sym == XK_Meta_R;
+    }
+
+    return sym == XK_Super_L || sym == XK_Super_R || sym == XK_Hyper_L || sym == XK_Hyper_R;
 }
 
 static void usage(const char *prog) {
@@ -455,24 +669,40 @@ int main(int argc, char **argv) {
     app.atom_net_wm_state_max_vert = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
     app.atom_net_moveresize_window = XInternAtom(app.dpy, "_NET_MOVERESIZE_WINDOW", False);
     app.atom_net_wm_window_opacity = XInternAtom(app.dpy, "_NET_WM_WINDOW_OPACITY", False);
+    app.atom_net_workarea = XInternAtom(app.dpy, "_NET_WORKAREA", False);
+    app.atom_net_current_desktop = XInternAtom(app.dpy, "_NET_CURRENT_DESKTOP", False);
 
     init_visuals(&app);
     grab_with_lock_variants(&app, app.config.button, app.config.modifier);
+    grab_modifier_keys(&app, app.config.modifier);
     XSync(app.dpy, False);
 
     for (;;) {
         XEvent ev;
         XNextEvent(app.dpy, &ev);
 
-        if (ev.type == ButtonPress) {
+        if (ev.type == KeyPress) {
+            XKeyEvent *kev = &ev.xkey;
+            if (is_modifier_key(&app, kev->keycode)) {
+                app.modifier_down = true;
+                set_overlay_visible(&app, true);
+                XSync(app.dpy, False);
+            }
+        } else if (ev.type == KeyRelease) {
+            XKeyEvent *kev = &ev.xkey;
+            if (is_modifier_key(&app, kev->keycode)) {
+                app.modifier_down = false;
+                if (!app.dragging) set_overlay_visible(&app, false);
+                XSync(app.dpy, False);
+            }
+        } else if (ev.type == ButtonPress) {
             XButtonEvent *bev = &ev.xbutton;
             if (bev->subwindow == None) continue;
-
             app.target = resolve_client_window(&app, bev->subwindow);
             app.dragging = true;
+            app.modifier_down = true;
             app.current_rect = (Rect){0};
             set_overlay_visible(&app, true);
-            show_preview(&app, &app.current_rect);
             XRaiseWindow(app.dpy, app.target);
             XSync(app.dpy, False);
         } else if (ev.type == MotionNotify && app.dragging) {
@@ -485,11 +715,14 @@ int main(int argc, char **argv) {
             }
         } else if (ev.type == ButtonRelease && app.dragging) {
             apply_snap(&app, &app.current_rect);
-            XUnmapWindow(app.dpy, app.preview);
-            set_overlay_visible(&app, false);
             app.dragging = false;
             app.target = None;
             app.current_rect = (Rect){0};
+            if (!app.modifier_down) {
+                set_overlay_visible(&app, false);
+            } else {
+                XUnmapWindow(app.dpy, app.preview);
+            }
             XSync(app.dpy, False);
         }
     }

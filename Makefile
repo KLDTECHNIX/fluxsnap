@@ -7,8 +7,8 @@ PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2 -pipe
 CFLAGS += -Wall -Wextra -pedantic -std=c11
 
-X11_CFLAGS != $(PKG_CONFIG) --cflags x11 2>/dev/null || echo -I$(PREFIX)/include
-X11_LIBS != $(PKG_CONFIG) --libs x11 2>/dev/null || echo -L$(PREFIX)/lib -lX11
+X11_CFLAGS != $(PKG_CONFIG) --cflags x11 xext 2>/dev/null || echo -I$(PREFIX)/include
+X11_LIBS != $(PKG_CONFIG) --libs x11 xext 2>/dev/null || echo -L$(PREFIX)/lib -lX11 -lXext
 
 PROG = fluxsnap
 SRCS = src/fluxsnap.c
