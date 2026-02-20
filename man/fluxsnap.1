@@ -1,0 +1,52 @@
+.Dd February 20, 2026
+.Dt FLUXSNAP 1
+.Os
+.Sh NAME
+.Nm fluxsnap
+.Nd hotkey tiler with zone-based layout for Fluxbox/X11
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar config
+.Sh DESCRIPTION
+.Nm
+retiles windows using configured zones and spacing.
+It honors
+.Pa _NET_WORKAREA
+so Fluxbox toolbar/slit space is respected.
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl c Ar config
+Path to a configuration file.
+.It Fl h
+Show usage help.
+.El
+.Sh CONFIGURATION
+Supported keys:
+.Bl -tag -width zone
+.It Ic modifier
+Super, Mod4, Alt, Mod1, Ctrl, Control, or Shift.
+.It Ic hotkey
+X keysym string (for example: space, F12, Return).
+.It Ic gap
+Global outer gap from monitor/workarea edges.
+.It Ic zone
+Repeatable zone definition:
+.Bd -literal -offset indent
+zone=name,x_pct,y_pct,w_pct,h_pct,layout,max_windows,zone_gap
+.Ed
+.Pp
+Zone layout modes:
+.Bl -bullet -compact
+.It
+rows
+.It
+cols
+.It
+grid
+.El
+.Pp
+When
+.Ic max_windows
+is 0, the zone accepts unlimited windows.
+.Sh SEE ALSO
+.Xr fluxbox 1

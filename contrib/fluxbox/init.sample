@@ -1,0 +1,8 @@
+# Recommended ~/.fluxbox/init settings for fluxsnap
+# Disable Fluxbox native edge snapping to prevent conflicts.
+
+session.screen0.edgeSnapThreshold:    0
+session.screen0.windowSnapThreshold:  0
+session.screen0.opaqueMove:           true
+session.screen0.fullMaximization:     true
+session.screen0.maxDisableMove:       false
