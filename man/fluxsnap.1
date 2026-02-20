@@ -84,7 +84,50 @@ This installs:
 .Pa /usr/local/etc/fluxsnap.conf.sample
 .It
 .Pa /usr/local/man/man1/fluxsnap.1
+.It
+.Pa /usr/local/share/examples/fluxsnap
 .El
+
+.Sh FLUXBOX INTEGRATION
+.Nm
+installs Fluxbox integration examples and a profile helper:
+.Bl -bullet -compact
+.It
+.Pa /usr/local/bin/fluxsnap-profile
+.It
+.Pa /usr/local/bin/fluxsnap-fluxbox-install
+.It
+.Pa /usr/local/share/examples/fluxsnap/fluxbox/menu.inc
+.It
+.Pa /usr/local/share/examples/fluxsnap/fluxbox/keys.sample
+.It
+.Pa /usr/local/share/examples/fluxsnap/fluxbox/init.sample
+.El
+.Pp
+
+.Pp
+For automatic user integration, run:
+.Bd -literal -offset indent
+fluxsnap-fluxbox-install
+.Ed
+.Pp
+The helper merges snippets into
+.Pa ~/.fluxbox/menu ,
+.Pa ~/.fluxbox/keys ,
+and
+.Pa ~/.fluxbox/init
+with timestamped backups.
+
+Merge the sample files into
+.Pa ~/.fluxbox/menu ,
+.Pa ~/.fluxbox/keys ,
+and
+.Pa ~/.fluxbox/init
+then run:
+.Bd -literal -offset indent
+fluxbox-remote reconfigure
+.Ed
+
 .Sh EXAMPLES
 Start from Fluxbox startup script:
 .Bd -literal -offset indent
