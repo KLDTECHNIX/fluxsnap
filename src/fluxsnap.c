@@ -328,6 +328,24 @@ static void set_pref_col(App *app, Window w, int col) {
     app->pref_count++;
 }
 
+
+static Window frame_window_for_client(App *app, Window client) {
+    Window root_ret;
+    Window parent_ret;
+    Window *children = NULL;
+    unsigned int nchildren = 0;
+
+    if (!XQueryTree(app->dpy, client, &root_ret, &parent_ret, &children, &nchildren)) {
+        return client;
+    }
+    if (children) XFree(children);
+
+    if (parent_ret != None && parent_ret != app->root) {
+        return parent_ret;
+    }
+    return client;
+}
+
 static void clear_maximized_state(App *app, Window w) {
     XEvent ev = {0};
     ev.xclient.type = ClientMessage;
@@ -357,7 +375,23 @@ static void apply_rect(App *app, Window w, const Rect *r) {
     ev.xclient.data.l[4] = r->height;
 
     XSendEvent(app->dpy, app->root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
-    XMoveResizeWindow(app->dpy, w, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
+
+    Window frame = frame_window_for_client(app, w);
+    XMoveResizeWindow(app->dpy, frame, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
+
+    if (frame != w) {
+        XWindowAttributes fa;
+        XWindowAttributes wa;
+        if (XGetWindowAttributes(app->dpy, frame, &fa) && XGetWindowAttributes(app->dpy, w, &wa)) {
+            int border_x = wa.x;
+            int border_y = wa.y;
+            int client_w = r->width - (border_x * 2);
+            int client_h = r->height - border_y - border_x;
+            if (client_w < 1) client_w = 1;
+            if (client_h < 1) client_h = 1;
+            XMoveResizeWindow(app->dpy, w, border_x, border_y, (unsigned int)client_w, (unsigned int)client_h);
+        }
+    }
 }
 
 
