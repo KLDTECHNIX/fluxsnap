@@ -2,6 +2,7 @@
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
+#include <X11/Xutil.h>
 #include <X11/extensions/shape.h>
 #include <ctype.h>
 #include <getopt.h>
@@ -54,6 +55,8 @@ typedef struct {
     Window target;
     bool dragging;
     bool modifier_down;
+    bool live_applied;
+    Rect original_rect;
     Rect current_rect;
 } App;
 
@@ -525,7 +528,7 @@ static bool apply_snap_via_ewmh(App *app, Window w, const Rect *r) {
     ev.xclient.message_type = app->atom_net_moveresize_window;
     ev.xclient.window = w;
     ev.xclient.format = 32;
-    ev.xclient.data.l[0] = (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11);
+    ev.xclient.data.l[0] = NorthWestGravity | (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11);
     ev.xclient.data.l[1] = r->x;
     ev.xclient.data.l[2] = r->y;
     ev.xclient.data.l[3] = r->width;
@@ -543,15 +546,25 @@ static void apply_snap(App *app, const Rect *r) {
     if (!app->target || !r->valid) return;
 
     clear_maximized_state(app, app->target);
-    if (!apply_snap_via_ewmh(app, app->target, r)) {
-        XMoveResizeWindow(app->dpy,
-                          app->target,
-                          r->x,
-                          r->y,
-                          (unsigned int)r->width,
-                          (unsigned int)r->height);
-    }
+    apply_snap_via_ewmh(app, app->target, r);
+    XMoveResizeWindow(app->dpy,
+                      app->target,
+                      r->x,
+                      r->y,
+                      (unsigned int)r->width,
+                      (unsigned int)r->height);
     XRaiseWindow(app->dpy, app->target);
+}
+
+static void restore_original_rect(App *app) {
+    if (!app->target || !app->original_rect.valid) return;
+
+    XMoveResizeWindow(app->dpy,
+                      app->target,
+                      app->original_rect.x,
+                      app->original_rect.y,
+                      (unsigned int)app->original_rect.width,
+                      (unsigned int)app->original_rect.height);
 }
 
 static void grab_with_lock_variants(App *app, unsigned int button, unsigned int modifier) {
@@ -701,7 +714,14 @@ int main(int argc, char **argv) {
             app.target = resolve_client_window(&app, bev->subwindow);
             app.dragging = true;
             app.modifier_down = true;
+            app.live_applied = false;
             app.current_rect = (Rect){0};
+            XWindowAttributes attrs;
+            if (XGetWindowAttributes(app.dpy, app.target, &attrs)) {
+                app.original_rect = (Rect){attrs.x, attrs.y, attrs.width, attrs.height, true};
+            } else {
+                app.original_rect = (Rect){0};
+            }
             set_overlay_visible(&app, true);
             XRaiseWindow(app.dpy, app.target);
             XSync(app.dpy, False);
@@ -711,12 +731,21 @@ int main(int argc, char **argv) {
             if (!rect_equal(&next, &app.current_rect)) {
                 app.current_rect = next;
                 show_preview(&app, &next);
+                if (next.valid) {
+                    apply_snap(&app, &next);
+                    app.live_applied = true;
+                } else if (app.live_applied) {
+                    restore_original_rect(&app);
+                    app.live_applied = false;
+                }
                 XSync(app.dpy, False);
             }
         } else if (ev.type == ButtonRelease && app.dragging) {
             apply_snap(&app, &app.current_rect);
             app.dragging = false;
+            app.live_applied = false;
             app.target = None;
+            app.original_rect = (Rect){0};
             app.current_rect = (Rect){0};
             if (!app.modifier_down) {
                 set_overlay_visible(&app, false);

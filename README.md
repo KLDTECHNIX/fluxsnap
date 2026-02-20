@@ -6,6 +6,7 @@
 
 - Modifier+drag snapping (default: `Super` + left mouse drag)
 - Screen darkens as soon as the modifier is held, with a light snap target preview while dragging
+- Live window resize while dragging into a snap zone (Windows-like behavior)
 - Left/right half snapping
 - Corner quarter snapping
 - Top edge maximize, plus quick left/right split from top band
