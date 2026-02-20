@@ -1,0 +1,10 @@
+# Fluxsnap integration for ~/.fluxbox/keys
+
+# Start/stop daemon
+Mod4 F9 :ExecCommand pkill -x fluxsnap; fluxsnap &
+Mod4 Shift F9 :ExecCommand pkill -x fluxsnap
+
+# Smart tile is triggered by fluxsnap hotkey configured in ~/.config/fluxsnap/config
+
+# Edit active config
+Mod4 F11 :ExecCommand xterm -e sh -lc '${EDITOR:-vi} ~/.config/fluxsnap/config'
