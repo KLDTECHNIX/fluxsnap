@@ -1,0 +1,57 @@
+.Dd February 20, 2026
+.Dt FLUXSNAP 1
+.Os
+.Sh NAME
+.Nm fluxsnap
+.Nd hotkey tiling helper for Fluxbox/X11
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar config
+.Sh DESCRIPTION
+.Nm
+retiles windows inside monitor-visible workareas.
+It honors EWMH
+.Pa _NET_WORKAREA
+so Fluxbox toolbar/slit space is respected.
+.Pp
+Default behavior per monitor:
+.Bl -bullet -compact
+.It
+2 windows: even split
+.It
+3 windows: even thirds
+.It
+4+ windows: stacked across 3 columns
+.El
+.Pp
+Default gap/border is 10px.
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl c Ar config
+Path to a configuration file.
+.It Fl h
+Show usage help.
+.El
+.Sh CONFIGURATION
+.Bl -tag -width hotkey
+.It Ic modifier
+Super, Mod4, Alt, Mod1, Ctrl, Control, or Shift.
+.It Ic hotkey
+X keysym string (for example: space, F12, Return).
+.It Ic gap
+Pixels around and between tiled windows.
+.El
+.Sh TROUBLESHOOTING
+If
+.Nm
+reports
+.Dq BadAccess
+for
+.Dq X_GrabKey ,
+the selected key is already grabbed by Fluxbox or another hotkey daemon.
+Choose a different
+.Ic modifier
+or
+.Ic hotkey .
+.Sh SEE ALSO
+.Xr fluxbox 1
