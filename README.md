@@ -5,7 +5,7 @@
 ## Features
 
 - Modifier+drag snapping (default: `Super` + left mouse drag)
-- Live preview rectangle while dragging
+- Screen-dimming overlay while dragging, with a light snap target preview
 - Left/right half snapping
 - Corner quarter snapping
 - Top edge maximize, plus quick left/right split from top band
@@ -66,4 +66,27 @@ For Fluxbox auto-start, add to `~/.fluxbox/startup`:
 
 ```sh
 fluxsnap &
+```
+
+## Preset: Left main + right stacked
+
+A ready-to-use preset for your requested layout is included at:
+
+- `configs/left-main-right-stack.conf`
+
+It creates a workflow where you snap one window to the left half,
+then two windows to top-right and bottom-right, with a 30px gap:
+
+```ini
+modifier=Ctrl
+mouse_button=1
+edge_threshold=72
+top_band=100
+gap=30
+```
+
+Run with:
+
+```sh
+fluxsnap -c ./configs/left-main-right-stack.conf
 ```

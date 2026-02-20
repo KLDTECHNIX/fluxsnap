@@ -1,21 +1,22 @@
-#include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/Xlib.h>
 #include <X11/keysym.h>
-#include <sys/param.h>
 #include <ctype.h>
-#include <errno.h>
+#include <getopt.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <getopt.h>
+#include <sys/param.h>
 #include <unistd.h>
 
 #define DEFAULT_EDGE_THRESHOLD 56
 #define DEFAULT_TOP_BAND 84
 #define DEFAULT_GAP 8
+#define OVERLAY_OPACITY 0xC0000000UL
+#define PREVIEW_OPACITY 0xA0000000UL
 
 typedef struct {
     unsigned int modifier;
@@ -37,7 +38,14 @@ typedef struct {
     Display *dpy;
     int screen;
     Window root;
+    Window overlay;
     Window preview;
+    Atom atom_wm_state;
+    Atom atom_net_wm_state;
+    Atom atom_net_wm_state_max_horz;
+    Atom atom_net_wm_state_max_vert;
+    Atom atom_net_moveresize_window;
+    Atom atom_net_wm_window_opacity;
     Config config;
     Window target;
     bool dragging;
@@ -145,43 +153,124 @@ static void load_config(Config *cfg, const char *explicit_path) {
     load_config_file(cfg, "/usr/local/etc/fluxsnap.conf");
 }
 
-static void init_preview(App *app) {
-    XSetWindowAttributes attrs;
-    attrs.override_redirect = True;
-    attrs.background_pixel = 0x3030ff;
-    attrs.border_pixel = 0xffffff;
-
-    app->preview = XCreateWindow(
-        app->dpy,
-        app->root,
-        0,
-        0,
-        1,
-        1,
-        2,
-        CopyFromParent,
-        InputOutput,
-        CopyFromParent,
-        CWOverrideRedirect | CWBackPixel | CWBorderPixel,
-        &attrs);
-    XSelectInput(app->dpy, app->preview, ExposureMask);
+static void set_window_opacity(App *app, Window w, unsigned long opacity) {
+    if (app->atom_net_wm_window_opacity == None) return;
+    XChangeProperty(app->dpy,
+                    w,
+                    app->atom_net_wm_window_opacity,
+                    XA_CARDINAL,
+                    32,
+                    PropModeReplace,
+                    (unsigned char *)&opacity,
+                    1);
 }
 
-static Window top_level_window(Display *dpy, Window w, Window root) {
-    Window parent = w;
-    Window next_parent;
-    Window *children = NULL;
-    unsigned int nchildren;
+static void init_visuals(App *app) {
+    XSetWindowAttributes dim_attrs;
+    dim_attrs.override_redirect = True;
+    dim_attrs.background_pixel = BlackPixel(app->dpy, app->screen);
 
-    while (true) {
-        if (!XQueryTree(dpy, parent, &root, &next_parent, &children, &nchildren)) {
+    int sw = DisplayWidth(app->dpy, app->screen);
+    int sh = DisplayHeight(app->dpy, app->screen);
+
+    app->overlay = XCreateWindow(app->dpy,
+                                 app->root,
+                                 0,
+                                 0,
+                                 (unsigned int)sw,
+                                 (unsigned int)sh,
+                                 0,
+                                 CopyFromParent,
+                                 InputOutput,
+                                 CopyFromParent,
+                                 CWOverrideRedirect | CWBackPixel,
+                                 &dim_attrs);
+
+    XSetWindowAttributes preview_attrs;
+    preview_attrs.override_redirect = True;
+    preview_attrs.background_pixel = 0xf3f3f3;
+    preview_attrs.border_pixel = 0xffffff;
+
+    app->preview = XCreateWindow(app->dpy,
+                                 app->root,
+                                 0,
+                                 0,
+                                 1,
+                                 1,
+                                 2,
+                                 CopyFromParent,
+                                 InputOutput,
+                                 CopyFromParent,
+                                 CWOverrideRedirect | CWBackPixel | CWBorderPixel,
+                                 &preview_attrs);
+
+    set_window_opacity(app, app->overlay, OVERLAY_OPACITY);
+    set_window_opacity(app, app->preview, PREVIEW_OPACITY);
+}
+
+static bool has_property(App *app, Window w, Atom property) {
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems;
+    unsigned long bytes_after;
+    unsigned char *prop = NULL;
+
+    int rc = XGetWindowProperty(app->dpy,
+                                w,
+                                property,
+                                0,
+                                0,
+                                False,
+                                AnyPropertyType,
+                                &actual_type,
+                                &actual_format,
+                                &nitems,
+                                &bytes_after,
+                                &prop);
+    if (prop) XFree(prop);
+    return rc == Success && actual_type != None;
+}
+
+static Window find_client_child(App *app, Window w, int depth) {
+    if (depth > 6) return None;
+    if (has_property(app, w, app->atom_wm_state)) return w;
+
+    Window root_ret;
+    Window parent_ret;
+    Window *children = NULL;
+    unsigned int nchildren = 0;
+    if (!XQueryTree(app->dpy, w, &root_ret, &parent_ret, &children, &nchildren)) {
+        return None;
+    }
+
+    Window result = None;
+    for (unsigned int i = 0; i < nchildren; i++) {
+        result = find_client_child(app, children[i], depth + 1);
+        if (result != None) break;
+    }
+    if (children) XFree(children);
+    return result;
+}
+
+static Window resolve_client_window(App *app, Window w) {
+    Window candidate = w;
+    Window root_ret;
+    Window parent_ret;
+    Window *children = NULL;
+    unsigned int nchildren = 0;
+
+    while (candidate != None) {
+        if (has_property(app, candidate, app->atom_wm_state)) return candidate;
+
+        Window child_candidate = find_client_child(app, candidate, 0);
+        if (child_candidate != None) return child_candidate;
+
+        if (!XQueryTree(app->dpy, candidate, &root_ret, &parent_ret, &children, &nchildren)) {
             break;
         }
         if (children) XFree(children);
-        if (next_parent == root || next_parent == 0) {
-            return parent;
-        }
-        parent = next_parent;
+        if (parent_ret == root_ret || parent_ret == None) break;
+        candidate = parent_ret;
     }
 
     return w;
@@ -234,8 +323,18 @@ static Rect compute_snap_rect(App *app, int pointer_x, int pointer_y) {
 }
 
 static bool rect_equal(const Rect *a, const Rect *b) {
-    return a->valid == b->valid && a->x == b->x && a->y == b->y &&
-           a->width == b->width && a->height == b->height;
+    return a->valid == b->valid && a->x == b->x && a->y == b->y && a->width == b->width && a->height == b->height;
+}
+
+static void set_overlay_visible(App *app, bool visible) {
+    if (visible) {
+        int sw = DisplayWidth(app->dpy, app->screen);
+        int sh = DisplayHeight(app->dpy, app->screen);
+        XMoveResizeWindow(app->dpy, app->overlay, 0, 0, (unsigned int)sw, (unsigned int)sh);
+        XMapRaised(app->dpy, app->overlay);
+    } else {
+        XUnmapWindow(app->dpy, app->overlay);
+    }
 }
 
 static void show_preview(App *app, const Rect *r) {
@@ -248,9 +347,57 @@ static void show_preview(App *app, const Rect *r) {
     XMapRaised(app->dpy, app->preview);
 }
 
+static void clear_maximized_state(App *app, Window w) {
+    if (app->atom_net_wm_state == None || app->atom_net_wm_state_max_horz == None || app->atom_net_wm_state_max_vert == None) {
+        return;
+    }
+
+    XEvent ev = {0};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.window = w;
+    ev.xclient.message_type = app->atom_net_wm_state;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = 0;
+    ev.xclient.data.l[1] = app->atom_net_wm_state_max_horz;
+    ev.xclient.data.l[2] = app->atom_net_wm_state_max_vert;
+    ev.xclient.data.l[3] = 2;
+
+    XSendEvent(app->dpy,
+               app->root,
+               False,
+               SubstructureRedirectMask | SubstructureNotifyMask,
+               &ev);
+}
+
+static bool apply_snap_via_ewmh(App *app, Window w, const Rect *r) {
+    if (app->atom_net_moveresize_window == None) return false;
+
+    XEvent ev = {0};
+    ev.xclient.type = ClientMessage;
+    ev.xclient.message_type = app->atom_net_moveresize_window;
+    ev.xclient.window = w;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11);
+    ev.xclient.data.l[1] = r->x;
+    ev.xclient.data.l[2] = r->y;
+    ev.xclient.data.l[3] = (long)r->width;
+    ev.xclient.data.l[4] = (long)r->height;
+
+    Status sent = XSendEvent(app->dpy,
+                             app->root,
+                             False,
+                             SubstructureRedirectMask | SubstructureNotifyMask,
+                             &ev);
+    return sent != 0;
+}
+
 static void apply_snap(App *app, const Rect *r) {
     if (!app->target || !r->valid) return;
-    XMoveResizeWindow(app->dpy, app->target, r->x, r->y, r->width, r->height);
+
+    clear_maximized_state(app, app->target);
+    if (!apply_snap_via_ewmh(app, app->target, r)) {
+        XMoveResizeWindow(app->dpy, app->target, r->x, r->y, r->width, r->height);
+    }
     XRaiseWindow(app->dpy, app->target);
 }
 
@@ -302,7 +449,14 @@ int main(int argc, char **argv) {
     app.screen = DefaultScreen(app.dpy);
     app.root = RootWindow(app.dpy, app.screen);
 
-    init_preview(&app);
+    app.atom_wm_state = XInternAtom(app.dpy, "WM_STATE", False);
+    app.atom_net_wm_state = XInternAtom(app.dpy, "_NET_WM_STATE", False);
+    app.atom_net_wm_state_max_horz = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+    app.atom_net_wm_state_max_vert = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+    app.atom_net_moveresize_window = XInternAtom(app.dpy, "_NET_MOVERESIZE_WINDOW", False);
+    app.atom_net_wm_window_opacity = XInternAtom(app.dpy, "_NET_WM_WINDOW_OPACITY", False);
+
+    init_visuals(&app);
     grab_with_lock_variants(&app, app.config.button, app.config.modifier);
     XSync(app.dpy, False);
 
@@ -313,10 +467,14 @@ int main(int argc, char **argv) {
         if (ev.type == ButtonPress) {
             XButtonEvent *bev = &ev.xbutton;
             if (bev->subwindow == None) continue;
-            app.target = top_level_window(app.dpy, bev->subwindow, app.root);
+
+            app.target = resolve_client_window(&app, bev->subwindow);
             app.dragging = true;
             app.current_rect = (Rect){0};
+            set_overlay_visible(&app, true);
+            show_preview(&app, &app.current_rect);
             XRaiseWindow(app.dpy, app.target);
+            XSync(app.dpy, False);
         } else if (ev.type == MotionNotify && app.dragging) {
             XMotionEvent *mev = &ev.xmotion;
             Rect next = compute_snap_rect(&app, mev->x_root, mev->y_root);
@@ -328,6 +486,7 @@ int main(int argc, char **argv) {
         } else if (ev.type == ButtonRelease && app.dragging) {
             apply_snap(&app, &app.current_rect);
             XUnmapWindow(app.dpy, app.preview);
+            set_overlay_visible(&app, false);
             app.dragging = false;
             app.target = None;
             app.current_rect = (Rect){0};
