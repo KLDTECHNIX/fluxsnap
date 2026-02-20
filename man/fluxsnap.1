@@ -63,3 +63,17 @@ doas make install
 .Ed
 .Sh SEE ALSO
 .Xr fluxbox 1
+
+.Sh TROUBLESHOOTING
+If
+.Nm
+reports a
+.Dq BadAccess
+error for
+.Dq X_GrabKey ,
+the selected hotkey is already owned by another client (often Fluxbox or a hotkey daemon).
+Change
+.Ic modifier
+and
+.Ic hotkey
+in the config, or unbind that key in Fluxbox.

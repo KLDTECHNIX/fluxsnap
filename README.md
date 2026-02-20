@@ -58,3 +58,9 @@ It merges menu/keys/init snippets into your `~/.fluxbox/*`, reloads Fluxbox, and
 ```sh
 fluxsnap
 ```
+
+
+## Troubleshooting
+
+If startup fails with `BadAccess` / `X_GrabKey`, that means another program already owns your hotkey.
+Pick a different `modifier`/`hotkey` in `~/.config/fluxsnap/config` or unbind the key in Fluxbox.

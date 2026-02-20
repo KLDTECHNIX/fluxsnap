@@ -17,6 +17,17 @@
 #define DEFAULT_GAP 16
 #define MAX_MANAGED 1024
 
+static int g_grab_badaccess = 0;
+
+static int xerr_grab_handler(Display *dpy, XErrorEvent *ev) {
+    (void)dpy;
+    if (ev->error_code == BadAccess && ev->request_code == 33) {
+        g_grab_badaccess = 1;
+        return 0;
+    }
+    return 0;
+}
+
 typedef struct {
     unsigned int modifier;
     KeySym trigger_key;
@@ -512,10 +523,13 @@ static void maybe_pick_window_column(App *app) {
     }
 }
 
-static void grab_hotkey(App *app) {
+static bool grab_hotkey(App *app) {
     const unsigned int masks[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
     KeyCode code = XKeysymToKeycode(app->dpy, app->config.trigger_key);
-    if (code == 0) return;
+    if (code == 0) return false;
+
+    int (*old_handler)(Display *, XErrorEvent *) = XSetErrorHandler(xerr_grab_handler);
+    g_grab_badaccess = 0;
 
     for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
         XGrabKey(app->dpy,
@@ -526,7 +540,13 @@ static void grab_hotkey(App *app) {
                  GrabModeAsync,
                  GrabModeAsync);
     }
+
+    XSync(app->dpy, False);
+    XSetErrorHandler(old_handler);
+
+    return g_grab_badaccess == 0;
 }
+
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s [-c /path/to/config]\n", prog);
@@ -572,7 +592,15 @@ int main(int argc, char **argv) {
     app.atom_net_wm_state_max_vert = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
 
     XSelectInput(app.dpy, app.root, SubstructureNotifyMask | KeyPressMask);
-    grab_hotkey(&app);
+    if (!grab_hotkey(&app)) {
+        fprintf(stderr, "fluxsnap: hotkey %s+%s is already grabbed by another program/window manager\n",
+                (app.config.modifier == Mod4Mask) ? "Super" :
+                (app.config.modifier == Mod1Mask) ? "Alt" :
+                (app.config.modifier == ControlMask) ? "Ctrl" : "Shift",
+                app.config.trigger_key_name);
+        fprintf(stderr, "fluxsnap: change modifier/hotkey in config or unbind the key in Fluxbox\n");
+        return 1;
+    }
     XSync(app.dpy, False);
 
     for (;;) {
