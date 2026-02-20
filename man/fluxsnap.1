@@ -3,23 +3,28 @@
 .Os
 .Sh NAME
 .Nm fluxsnap
-.Nd keyboard-triggered smart tiling for Fluxbox/X11
+.Nd hotkey tiling helper for Fluxbox/X11
 .Sh SYNOPSIS
 .Nm
 .Op Fl c Ar config
 .Sh DESCRIPTION
 .Nm
-listens for a configured hotkey (default: Super+Space).
-When triggered, it tiles all normal windows across three columns with configured gaps.
+retiles windows inside monitor-visible workareas.
+It honors EWMH
+.Pa _NET_WORKAREA
+so Fluxbox toolbar/slit space is respected.
 .Pp
-After tiling, clicking a window opens a small placement menu near the pointer with
-"Left", "Middle", and "Right" choices.
-The selected column preference is remembered for that window and reused in future tiling passes.
+Default behavior per monitor:
+.Bl -bullet -compact
+.It
+2 windows: even split
+.It
+3 windows: even thirds
+.It
+4+ windows: stacked across 3 columns
+.El
 .Pp
-Newly mapped windows are automatically tiled into the layout.
-.Pp
-The EWMH workarea is honored, so Fluxbox toolbar/slit/dock reserved space is respected.
-When built with Xinerama support, layouts are constrained to visible monitor bounds.
+Default gap/border is 10px.
 .Sh OPTIONS
 .Bl -tag -width indent
 .It Fl c Ar config
@@ -28,53 +33,25 @@ Path to a configuration file.
 Show usage help.
 .El
 .Sh CONFIGURATION
-Supported keys:
 .Bl -tag -width hotkey
 .It Ic modifier
 Super, Mod4, Alt, Mod1, Ctrl, Control, or Shift.
 .It Ic hotkey
-X keysym string such as
-.Dq space ,
-.Dq F12 ,
-or
-.Dq Return .
+X keysym string (for example: space, F12, Return).
 .It Ic gap
-Gap in pixels around and between tiled windows.
+Pixels around and between tiled windows.
 .El
-.Sh FLUXBOX INTEGRATION
-Run:
-.Bd -literal -offset indent
-fluxsnap-fluxbox-install
-.Ed
-.Pp
-This helper merges snippets into:
-.Bl -bullet -compact
-.It
-.Pa ~/.fluxbox/menu
-.It
-.Pa ~/.fluxbox/keys
-.It
-.Pa ~/.fluxbox/init
-.El
-and reloads Fluxbox.
-.Sh INSTALLATION
-.Bd -literal -offset indent
-make
-doas make install
-.Ed
-.Sh SEE ALSO
-.Xr fluxbox 1
-
 .Sh TROUBLESHOOTING
 If
 .Nm
-reports a
+reports
 .Dq BadAccess
-error for
+for
 .Dq X_GrabKey ,
-the selected hotkey is already owned by another client (often Fluxbox or a hotkey daemon).
-Change
+the selected key is already grabbed by Fluxbox or another hotkey daemon.
+Choose a different
 .Ic modifier
-and
-.Ic hotkey
-in the config, or unbind that key in Fluxbox.
+or
+.Ic hotkey .
+.Sh SEE ALSO
+.Xr fluxbox 1

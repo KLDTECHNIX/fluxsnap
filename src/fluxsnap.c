@@ -1,8 +1,8 @@
+#include <X11/XKBlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
-#include <X11/keysym.h>
 #include <X11/Xutil.h>
-#include <X11/XKBlib.h>
+#include <X11/keysym.h>
 #ifdef HAVE_XINERAMA
 #include <X11/extensions/Xinerama.h>
 #endif
@@ -15,21 +15,10 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/param.h>
-#include <unistd.h>
 
-#define DEFAULT_GAP 16
+#define DEFAULT_GAP 10
 #define MAX_MANAGED 1024
-
-static int g_grab_badaccess = 0;
-
-static int xerr_grab_handler(Display *dpy, XErrorEvent *ev) {
-    (void)dpy;
-    if (ev->error_code == BadAccess && ev->request_code == 33) {
-        g_grab_badaccess = 1;
-        return 0;
-    }
-    return 0;
-}
+#define MAX_MONITORS 16
 
 typedef struct {
     unsigned int modifier;
@@ -47,17 +36,10 @@ typedef struct {
 } Rect;
 
 typedef struct {
-    Window w;
-    int preferred_col; /* -1 = auto */
-} Pref;
-
-
-typedef struct {
     Rect area;
     Window windows[MAX_MANAGED];
     int count;
 } MonitorBucket;
-
 
 typedef struct {
     Display *dpy;
@@ -74,10 +56,17 @@ typedef struct {
     Atom atom_net_wm_state_max_horz;
     Atom atom_net_wm_state_max_vert;
     Config config;
-    Pref prefs[MAX_MANAGED];
-    int pref_count;
-    bool awaiting_pick;
 } App;
+
+static int g_grab_badaccess = 0;
+
+static int xerr_grab_handler(Display *dpy, XErrorEvent *ev) {
+    (void)dpy;
+    if (ev->error_code == BadAccess && ev->request_code == 33) {
+        g_grab_badaccess = 1;
+    }
+    return 0;
+}
 
 static char *trim(char *s) {
     while (isspace((unsigned char)*s)) s++;
@@ -144,7 +133,6 @@ static void load_config_file(Config *cfg, const char *path) {
             if (v >= 0 && v <= 300) cfg->gap = (int)v;
         }
     }
-
     fclose(f);
 }
 
@@ -280,7 +268,9 @@ static bool is_normal_window(App *app, Window w) {
     if (!XGetWindowAttributes(app->dpy, w, &attrs)) return false;
     if (attrs.override_redirect || attrs.map_state != IsViewable) return false;
 
-    if (window_has_atom(app, w, app->atom_net_wm_window_type, app->atom_net_wm_window_type_dock)) return false;
+    if (window_has_atom(app, w, app->atom_net_wm_window_type, app->atom_net_wm_window_type_dock)) {
+        return false;
+    }
 
     Atom actual_type;
     int actual_format;
@@ -303,46 +293,59 @@ static bool is_normal_window(App *app, Window w) {
     return rc == Success && actual_type != None;
 }
 
-static int get_pref_index(App *app, Window w) {
-    for (int i = 0; i < app->pref_count; i++) {
-        if (app->prefs[i].w == w) return i;
+#ifdef HAVE_XINERAMA
+static Rect rect_intersection(const Rect *a, const Rect *b) {
+    int x1 = (a->x > b->x) ? a->x : b->x;
+    int y1 = (a->y > b->y) ? a->y : b->y;
+    int x2 = ((a->x + a->width) < (b->x + b->width)) ? (a->x + a->width) : (b->x + b->width);
+    int y2 = ((a->y + a->height) < (b->y + b->height)) ? (a->y + a->height) : (b->y + b->height);
+    if (x2 <= x1 || y2 <= y1) return (Rect){0};
+    return (Rect){x1, y1, x2 - x1, y2 - y1, true};
+}
+#endif
+
+static int get_visible_monitors(App *app, Rect workarea, Rect out[MAX_MONITORS]) {
+    int n = 0;
+
+#ifndef HAVE_XINERAMA
+    (void)app;
+#else
+    int evb, erb;
+    if (XineramaQueryExtension(app->dpy, &evb, &erb) && XineramaIsActive(app->dpy)) {
+        int xcount = 0;
+        XineramaScreenInfo *xs = XineramaQueryScreens(app->dpy, &xcount);
+        if (xs && xcount > 0) {
+            for (int i = 0; i < xcount && n < MAX_MONITORS; i++) {
+                Rect mon = {xs[i].x_org, xs[i].y_org, xs[i].width, xs[i].height, true};
+                Rect clipped = rect_intersection(&workarea, &mon);
+                if (clipped.valid) out[n++] = clipped;
+            }
+            XFree(xs);
+        }
     }
-    return -1;
+#endif
+
+    if (n == 0) out[n++] = workarea;
+    return n;
 }
 
-static int get_pref_col(App *app, Window w) {
-    int idx = get_pref_index(app, w);
-    if (idx < 0) return -1;
-    return app->prefs[idx].preferred_col;
-}
-
-static void set_pref_col(App *app, Window w, int col) {
-    int idx = get_pref_index(app, w);
-    if (idx >= 0) {
-        app->prefs[idx].preferred_col = col;
-        return;
+static int monitor_index_for_point(const Rect mons[], int nmon, int x, int y) {
+    for (int i = 0; i < nmon; i++) {
+        if (x >= mons[i].x && x < mons[i].x + mons[i].width && y >= mons[i].y && y < mons[i].y + mons[i].height) {
+            return i;
+        }
     }
-    if (app->pref_count >= MAX_MANAGED) return;
-    app->prefs[app->pref_count].w = w;
-    app->prefs[app->pref_count].preferred_col = col;
-    app->pref_count++;
+    return 0;
 }
-
 
 static Window frame_window_for_client(App *app, Window client) {
-    Window root_ret;
-    Window parent_ret;
+    Window root_ret, parent_ret;
     Window *children = NULL;
     unsigned int nchildren = 0;
 
-    if (!XQueryTree(app->dpy, client, &root_ret, &parent_ret, &children, &nchildren)) {
-        return client;
-    }
+    if (!XQueryTree(app->dpy, client, &root_ret, &parent_ret, &children, &nchildren)) return client;
     if (children) XFree(children);
-
-    if (parent_ret != None && parent_ret != app->root) {
-        return parent_ret;
-    }
+    if (parent_ret != None && parent_ret != app->root) return parent_ret;
     return client;
 }
 
@@ -356,11 +359,10 @@ static void clear_maximized_state(App *app, Window w) {
     ev.xclient.data.l[1] = app->atom_net_wm_state_max_horz;
     ev.xclient.data.l[2] = app->atom_net_wm_state_max_vert;
     ev.xclient.data.l[3] = 2;
-
     XSendEvent(app->dpy, app->root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
 }
 
-static void apply_rect(App *app, Window w, const Rect *r) {
+static void apply_rect(App *app, Window w, Rect r) {
     clear_maximized_state(app, w);
 
     XEvent ev = {0};
@@ -369,99 +371,15 @@ static void apply_rect(App *app, Window w, const Rect *r) {
     ev.xclient.window = w;
     ev.xclient.format = 32;
     ev.xclient.data.l[0] = NorthWestGravity | (1L << 8) | (1L << 9) | (1L << 10) | (1L << 11);
-    ev.xclient.data.l[1] = r->x;
-    ev.xclient.data.l[2] = r->y;
-    ev.xclient.data.l[3] = r->width;
-    ev.xclient.data.l[4] = r->height;
-
+    ev.xclient.data.l[1] = r.x;
+    ev.xclient.data.l[2] = r.y;
+    ev.xclient.data.l[3] = r.width;
+    ev.xclient.data.l[4] = r.height;
     XSendEvent(app->dpy, app->root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
 
     Window frame = frame_window_for_client(app, w);
-    XMoveResizeWindow(app->dpy, frame, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
-
-    if (frame != w) {
-        XWindowAttributes fa;
-        XWindowAttributes wa;
-        if (XGetWindowAttributes(app->dpy, frame, &fa) && XGetWindowAttributes(app->dpy, w, &wa)) {
-            int border_x = wa.x;
-            int border_y = wa.y;
-            int client_w = r->width - (border_x * 2);
-            int client_h = r->height - border_y - border_x;
-            if (client_w < 1) client_w = 1;
-            if (client_h < 1) client_h = 1;
-            XMoveResizeWindow(app->dpy, w, border_x, border_y, (unsigned int)client_w, (unsigned int)client_h);
-        }
-    }
+    XMoveResizeWindow(app->dpy, frame, r.x, r.y, (unsigned int)r.width, (unsigned int)r.height);
 }
-
-
-
-#ifdef HAVE_XINERAMA
-static Rect rect_intersection(const Rect *a, const Rect *b) {
-    int x1 = (a->x > b->x) ? a->x : b->x;
-    int y1 = (a->y > b->y) ? a->y : b->y;
-    int x2 = ((a->x + a->width) < (b->x + b->width)) ? (a->x + a->width) : (b->x + b->width);
-    int y2 = ((a->y + a->height) < (b->y + b->height)) ? (a->y + a->height) : (b->y + b->height);
-
-    if (x2 <= x1 || y2 <= y1) return (Rect){0};
-    return (Rect){x1, y1, x2 - x1, y2 - y1, true};
-}
-#endif
-
-static int monitor_index_for_point(const Rect monitors[], int nmon, int x, int y) {
-    for (int i = 0; i < nmon; i++) {
-        if (!monitors[i].valid) continue;
-        if (x >= monitors[i].x && x < monitors[i].x + monitors[i].width &&
-            y >= monitors[i].y && y < monitors[i].y + monitors[i].height) {
-            return i;
-        }
-    }
-
-    int best = 0;
-    long best_dist = LONG_MAX;
-    for (int i = 0; i < nmon; i++) {
-        if (!monitors[i].valid) continue;
-        int cx = monitors[i].x + monitors[i].width / 2;
-        int cy = monitors[i].y + monitors[i].height / 2;
-        long dx = (long)x - cx;
-        long dy = (long)y - cy;
-        long d = dx * dx + dy * dy;
-        if (d < best_dist) {
-            best_dist = d;
-            best = i;
-        }
-    }
-    return best;
-}
-
-static int get_visible_monitors(App *app, Rect workarea, Rect out[MAX_MANAGED]) {
-    int n = 0;
-
-#ifndef HAVE_XINERAMA
-    (void)app;
-#else
-    int evb, erb;
-    if (XineramaQueryExtension(app->dpy, &evb, &erb) && XineramaIsActive(app->dpy)) {
-        int xcount = 0;
-        XineramaScreenInfo *xscreens = XineramaQueryScreens(app->dpy, &xcount);
-        if (xscreens && xcount > 0) {
-            for (int i = 0; i < xcount && n < MAX_MANAGED; i++) {
-                Rect mon = {xscreens[i].x_org, xscreens[i].y_org, xscreens[i].width, xscreens[i].height, true};
-                Rect clipped = rect_intersection(&workarea, &mon);
-                if (clipped.valid) out[n++] = clipped;
-            }
-            XFree(xscreens);
-        }
-    }
-#endif
-
-    if (n == 0) {
-        out[0] = workarea;
-        n = 1;
-    }
-    return n;
-}
-
 
 static int load_client_list(App *app, Window out[MAX_MANAGED]) {
     Atom actual_type;
@@ -495,175 +413,98 @@ static int load_client_list(App *app, Window out[MAX_MANAGED]) {
     return count;
 }
 
+static void layout_bucket(App *app, MonitorBucket *b) {
+    int n = b->count;
+    if (n <= 0) return;
+
+    int gap = app->config.gap;
+    Rect a = b->area;
+
+    int inner_x = gap;
+    int inner_y = gap;
+
+    int columns = (n <= 3) ? n : 3;
+    int usable_w = a.width - (2 * gap) - ((columns - 1) * inner_x);
+    if (usable_w < columns) usable_w = columns;
+
+    int col_w[3] = {0, 0, 0};
+    for (int c = 0; c < columns; c++) {
+        col_w[c] = usable_w / columns + (c < (usable_w % columns) ? 1 : 0);
+    }
+
+    int col_x[3] = {a.x + gap, 0, 0};
+    for (int c = 1; c < columns; c++) {
+        col_x[c] = col_x[c - 1] + col_w[c - 1] + inner_x;
+    }
+
+    Window cols[3][MAX_MANAGED];
+    int ncol[3] = {0, 0, 0};
+
+    for (int i = 0; i < n; i++) {
+        int c = (n <= 3) ? i : (i % 3);
+        cols[c][ncol[c]++] = b->windows[i];
+    }
+
+    for (int c = 0; c < columns; c++) {
+        if (ncol[c] == 0) continue;
+
+        int usable_h = a.height - (2 * gap) - ((ncol[c] - 1) * inner_y);
+        if (usable_h < ncol[c]) usable_h = ncol[c];
+
+        int y = a.y + gap;
+        int base_h = usable_h / ncol[c];
+        int rem = usable_h % ncol[c];
+
+        for (int i = 0; i < ncol[c]; i++) {
+            int h = base_h + (i < rem ? 1 : 0);
+            Rect r = {col_x[c], y, col_w[c], h, true};
+            apply_rect(app, cols[c][i], r);
+            y += h + inner_y;
+        }
+    }
+}
+
 static void tile_all_windows(App *app) {
-    Window windows[MAX_MANAGED];
-    int count = load_client_list(app, windows);
+    Window wins[MAX_MANAGED];
+    int count = load_client_list(app, wins);
     if (count <= 0) return;
 
     Rect wa = get_workarea(app);
-    Rect monitors[MAX_MANAGED] = {0};
-    int nmon = get_visible_monitors(app, wa, monitors);
+    Rect mons[MAX_MONITORS] = {0};
+    int nmon = get_visible_monitors(app, wa, mons);
 
-    MonitorBucket buckets[MAX_MANAGED] = {0};
-    for (int m = 0; m < nmon; m++) {
-        buckets[m].area = monitors[m];
-    }
+    MonitorBucket buckets[MAX_MONITORS] = {0};
+    for (int m = 0; m < nmon; m++) buckets[m].area = mons[m];
 
     for (int i = 0; i < count; i++) {
         XWindowAttributes attrs;
+        Window child;
+        int root_x = 0;
+        int root_y = 0;
         int mon = 0;
-        if (XGetWindowAttributes(app->dpy, windows[i], &attrs)) {
-            int cx = attrs.x + attrs.width / 2;
-            int cy = attrs.y + attrs.height / 2;
-            mon = monitor_index_for_point(monitors, nmon, cx, cy);
+
+        if (XGetWindowAttributes(app->dpy, wins[i], &attrs)) {
+            XTranslateCoordinates(app->dpy,
+                                  wins[i],
+                                  app->root,
+                                  attrs.width / 2,
+                                  attrs.height / 2,
+                                  &root_x,
+                                  &root_y,
+                                  &child);
+            mon = monitor_index_for_point(mons, nmon, root_x, root_y);
         }
 
         if (buckets[mon].count < MAX_MANAGED) {
-            buckets[mon].windows[buckets[mon].count++] = windows[i];
+            buckets[mon].windows[buckets[mon].count++] = wins[i];
         }
     }
-
-    int g = app->config.gap;
-    int inner = g;
 
     for (int m = 0; m < nmon; m++) {
-        Rect area = buckets[m].area;
-        int bcount = buckets[m].count;
-        if (!area.valid || bcount == 0) continue;
-
-        int usable_w = area.width - (2 * g) - (2 * inner);
-        if (usable_w < 3) usable_w = 3;
-
-        int col_w[3] = {usable_w / 3, usable_w / 3, usable_w - (usable_w / 3) * 2};
-        int col_x[3];
-        col_x[0] = area.x + g;
-        col_x[1] = col_x[0] + col_w[0] + inner;
-        col_x[2] = col_x[1] + col_w[1] + inner;
-
-        Window cols[3][MAX_MANAGED];
-        int ncol[3] = {0, 0, 0};
-
-        for (int i = 0; i < bcount; i++) {
-            Window w = buckets[m].windows[i];
-            int pref = get_pref_col(app, w);
-            int target_col = pref;
-            if (target_col < 0 || target_col > 2) {
-                target_col = 0;
-                if (ncol[1] < ncol[target_col]) target_col = 1;
-                if (ncol[2] < ncol[target_col]) target_col = 2;
-            }
-            cols[target_col][ncol[target_col]++] = w;
-        }
-
-        int usable_h_base = area.height - (2 * g);
-        for (int c = 0; c < 3; c++) {
-            if (ncol[c] == 0) continue;
-
-            int usable_h = usable_h_base - ((ncol[c] - 1) * inner);
-            if (usable_h < ncol[c]) usable_h = ncol[c];
-
-            int y = area.y + g;
-            int base_h = usable_h / ncol[c];
-            int rem = usable_h % ncol[c];
-
-            for (int i = 0; i < ncol[c]; i++) {
-                int h = base_h + (i < rem ? 1 : 0);
-                Rect r = {col_x[c], y, col_w[c], h, true};
-                apply_rect(app, cols[c][i], &r);
-                y += h + inner;
-            }
-        }
+        layout_bucket(app, &buckets[m]);
     }
 
     XSync(app->dpy, False);
-}
-
-static int menu_pick_column(App *app, int root_x, int root_y) {
-    const int w = 210;
-    const int h = 42;
-    int sw = DisplayWidth(app->dpy, app->screen);
-    int sh = DisplayHeight(app->dpy, app->screen);
-
-    if (root_x + w > sw) root_x = sw - w;
-    if (root_y + h > sh) root_y = sh - h;
-    if (root_x < 0) root_x = 0;
-    if (root_y < 0) root_y = 0;
-
-    XSetWindowAttributes a;
-    a.override_redirect = True;
-    a.background_pixel = 0x222222;
-    a.border_pixel = 0xffffff;
-
-    Window menu = XCreateWindow(app->dpy,
-                                app->root,
-                                root_x,
-                                root_y,
-                                (unsigned int)w,
-                                (unsigned int)h,
-                                1,
-                                CopyFromParent,
-                                InputOutput,
-                                CopyFromParent,
-                                CWOverrideRedirect | CWBackPixel | CWBorderPixel,
-                                &a);
-    XSelectInput(app->dpy, menu, ExposureMask | ButtonPressMask);
-    XMapRaised(app->dpy, menu);
-
-    GC gc = DefaultGC(app->dpy, app->screen);
-    int choice = -1;
-
-    for (;;) {
-        XEvent ev;
-        XWindowEvent(app->dpy, menu, ExposureMask | ButtonPressMask, &ev);
-
-        if (ev.type == Expose) {
-            XSetForeground(app->dpy, gc, 0xdddddd);
-            XDrawLine(app->dpy, menu, gc, w / 3, 0, w / 3, h);
-            XDrawLine(app->dpy, menu, gc, (w * 2) / 3, 0, (w * 2) / 3, h);
-            XDrawString(app->dpy, menu, gc, 22, 25, "Left", 4);
-            XDrawString(app->dpy, menu, gc, 88, 25, "Middle", 6);
-            XDrawString(app->dpy, menu, gc, 163, 25, "Right", 5);
-        } else if (ev.type == ButtonPress) {
-            int x = ev.xbutton.x;
-            if (x < w / 3) choice = 0;
-            else if (x < (w * 2) / 3) choice = 1;
-            else choice = 2;
-            break;
-        }
-    }
-
-    XDestroyWindow(app->dpy, menu);
-    XSync(app->dpy, False);
-    return choice;
-}
-
-static void maybe_pick_window_column(App *app) {
-    if (!app->awaiting_pick) return;
-
-    app->awaiting_pick = false;
-    XGrabPointer(app->dpy,
-                 app->root,
-                 True,
-                 ButtonPressMask,
-                 GrabModeAsync,
-                 GrabModeAsync,
-                 None,
-                 None,
-                 CurrentTime);
-
-    XEvent ev;
-    XMaskEvent(app->dpy, ButtonPressMask, &ev);
-
-    XUngrabPointer(app->dpy, CurrentTime);
-
-    Window candidate = ev.xbutton.subwindow;
-        if (candidate == None || !is_normal_window(app, candidate)) return;
-
-    int pick = menu_pick_column(app, ev.xbutton.x_root, ev.xbutton.y_root);
-    if (pick >= 0) {
-        set_pref_col(app, candidate, pick);
-        tile_all_windows(app);
-    }
 }
 
 static bool grab_hotkey(App *app) {
@@ -686,10 +527,8 @@ static bool grab_hotkey(App *app) {
 
     XSync(app->dpy, False);
     XSetErrorHandler(old_handler);
-
     return g_grab_badaccess == 0;
 }
-
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s [-c /path/to/config]\n", prog);
@@ -736,7 +575,8 @@ int main(int argc, char **argv) {
 
     XSelectInput(app.dpy, app.root, SubstructureNotifyMask | KeyPressMask);
     if (!grab_hotkey(&app)) {
-        fprintf(stderr, "fluxsnap: hotkey %s+%s is already grabbed by another program/window manager\n",
+        fprintf(stderr,
+                "fluxsnap: hotkey %s+%s is already grabbed by another program/window manager\n",
                 (app.config.modifier == Mod4Mask) ? "Super" :
                 (app.config.modifier == Mod1Mask) ? "Alt" :
                 (app.config.modifier == ControlMask) ? "Ctrl" : "Shift",
@@ -744,7 +584,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "fluxsnap: change modifier/hotkey in config or unbind the key in Fluxbox\n");
         return 1;
     }
-    XSync(app.dpy, False);
 
     for (;;) {
         XEvent ev;
@@ -754,20 +593,10 @@ int main(int argc, char **argv) {
             KeySym sym = XkbKeycodeToKeysym(app.dpy, ev.xkey.keycode, 0, 0);
             if (sym == app.config.trigger_key && (ev.xkey.state & app.config.modifier)) {
                 tile_all_windows(&app);
-                app.awaiting_pick = true;
-                maybe_pick_window_column(&app);
             }
         } else if (ev.type == MapNotify) {
             if (ev.xmap.event == app.root && is_normal_window(&app, ev.xmap.window)) {
                 tile_all_windows(&app);
-            }
-        } else if (ev.type == DestroyNotify) {
-            for (int i = 0; i < app.pref_count; i++) {
-                if (app.prefs[i].w == ev.xdestroywindow.window) {
-                    app.prefs[i] = app.prefs[app.pref_count - 1];
-                    app.pref_count--;
-                    break;
-                }
             }
         }
     }
