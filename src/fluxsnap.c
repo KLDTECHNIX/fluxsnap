@@ -1,9 +1,8 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
-#include <X11/XKBlib.h>
 #include <X11/Xutil.h>
-#include <X11/extensions/shape.h>
+#include <X11/XKBlib.h>
 #include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
@@ -15,17 +14,13 @@
 #include <sys/param.h>
 #include <unistd.h>
 
-#define DEFAULT_EDGE_THRESHOLD 56
-#define DEFAULT_TOP_BAND 84
-#define DEFAULT_GAP 8
-#define OVERLAY_OPACITY 0xC0000000UL
-#define PREVIEW_OPACITY 0xA0000000UL
+#define DEFAULT_GAP 16
+#define MAX_MANAGED 1024
 
 typedef struct {
     unsigned int modifier;
-    unsigned int button;
-    int edge_threshold;
-    int top_band;
+    KeySym trigger_key;
+    char trigger_key_name[64];
     int gap;
 } Config;
 
@@ -38,35 +33,35 @@ typedef struct {
 } Rect;
 
 typedef struct {
+    Window w;
+    int preferred_col; /* -1 = auto */
+} Pref;
+
+typedef struct {
     Display *dpy;
     int screen;
     Window root;
-    Window overlay;
-    Window preview;
     Atom atom_wm_state;
+    Atom atom_net_workarea;
+    Atom atom_net_current_desktop;
+    Atom atom_net_client_list;
+    Atom atom_net_wm_window_type;
+    Atom atom_net_wm_window_type_dock;
+    Atom atom_net_moveresize_window;
     Atom atom_net_wm_state;
     Atom atom_net_wm_state_max_horz;
     Atom atom_net_wm_state_max_vert;
-    Atom atom_net_moveresize_window;
-    Atom atom_net_wm_window_opacity;
-    Atom atom_net_workarea;
-    Atom atom_net_current_desktop;
     Config config;
-    Window target;
-    bool dragging;
-    bool modifier_down;
-    bool live_applied;
-    Rect original_rect;
-    Rect current_rect;
+    Pref prefs[MAX_MANAGED];
+    int pref_count;
+    bool awaiting_pick;
 } App;
 
 static char *trim(char *s) {
     while (isspace((unsigned char)*s)) s++;
     if (*s == '\0') return s;
     char *end = s + strlen(s) - 1;
-    while (end > s && isspace((unsigned char)*end)) {
-        *end-- = '\0';
-    }
+    while (end > s && isspace((unsigned char)*end)) *end-- = '\0';
     return s;
 }
 
@@ -92,9 +87,8 @@ static bool parse_modifier(const char *value, unsigned int *mod) {
 
 static void set_default_config(Config *cfg) {
     cfg->modifier = Mod4Mask;
-    cfg->button = Button1;
-    cfg->edge_threshold = DEFAULT_EDGE_THRESHOLD;
-    cfg->top_band = DEFAULT_TOP_BAND;
+    cfg->trigger_key = XK_space;
+    snprintf(cfg->trigger_key_name, sizeof(cfg->trigger_key_name), "space");
     cfg->gap = DEFAULT_GAP;
 }
 
@@ -117,15 +111,12 @@ static void load_config_file(Config *cfg, const char *path) {
 
         if (strcasecmp(key, "modifier") == 0 && parse_modifier(value, &parsed_mod)) {
             cfg->modifier = parsed_mod;
-        } else if (strcasecmp(key, "mouse_button") == 0) {
-            long v = strtol(value, NULL, 10);
-            if (v >= 1 && v <= 5) cfg->button = (unsigned int)v;
-        } else if (strcasecmp(key, "edge_threshold") == 0) {
-            long v = strtol(value, NULL, 10);
-            if (v >= 1 && v <= 500) cfg->edge_threshold = (int)v;
-        } else if (strcasecmp(key, "top_band") == 0) {
-            long v = strtol(value, NULL, 10);
-            if (v >= 1 && v <= 500) cfg->top_band = (int)v;
+        } else if (strcasecmp(key, "hotkey") == 0) {
+            KeySym ks = XStringToKeysym(value);
+            if (ks != NoSymbol) {
+                cfg->trigger_key = ks;
+                snprintf(cfg->trigger_key_name, sizeof(cfg->trigger_key_name), "%s", value);
+            }
         } else if (strcasecmp(key, "gap") == 0) {
             long v = strtol(value, NULL, 10);
             if (v >= 0 && v <= 300) cfg->gap = (int)v;
@@ -161,145 +152,10 @@ static void load_config(Config *cfg, const char *explicit_path) {
     load_config_file(cfg, "/usr/local/etc/fluxsnap.conf");
 }
 
-static void set_window_opacity(App *app, Window w, unsigned long opacity) {
-    if (app->atom_net_wm_window_opacity == None) return;
-    XChangeProperty(app->dpy,
-                    w,
-                    app->atom_net_wm_window_opacity,
-                    XA_CARDINAL,
-                    32,
-                    PropModeReplace,
-                    (unsigned char *)&opacity,
-                    1);
-}
-
-static void make_input_passthrough(App *app, Window w) {
-    int shape_ev;
-    int shape_err;
-    if (!XShapeQueryExtension(app->dpy, &shape_ev, &shape_err)) return;
-    XShapeCombineRectangles(app->dpy, w, ShapeInput, 0, 0, NULL, 0, ShapeSet, 0);
-}
-
-static void init_visuals(App *app) {
-    XSetWindowAttributes dim_attrs;
-    dim_attrs.override_redirect = True;
-    dim_attrs.background_pixel = BlackPixel(app->dpy, app->screen);
-
-    int sw = DisplayWidth(app->dpy, app->screen);
-    int sh = DisplayHeight(app->dpy, app->screen);
-
-    app->overlay = XCreateWindow(app->dpy,
-                                 app->root,
-                                 0,
-                                 0,
-                                 (unsigned int)sw,
-                                 (unsigned int)sh,
-                                 0,
-                                 CopyFromParent,
-                                 InputOutput,
-                                 CopyFromParent,
-                                 CWOverrideRedirect | CWBackPixel,
-                                 &dim_attrs);
-
-    XSetWindowAttributes preview_attrs;
-    preview_attrs.override_redirect = True;
-    preview_attrs.background_pixel = 0xf3f3f3;
-    preview_attrs.border_pixel = 0xffffff;
-
-    app->preview = XCreateWindow(app->dpy,
-                                 app->root,
-                                 0,
-                                 0,
-                                 1,
-                                 1,
-                                 2,
-                                 CopyFromParent,
-                                 InputOutput,
-                                 CopyFromParent,
-                                 CWOverrideRedirect | CWBackPixel | CWBorderPixel,
-                                 &preview_attrs);
-
-    set_window_opacity(app, app->overlay, OVERLAY_OPACITY);
-    set_window_opacity(app, app->preview, PREVIEW_OPACITY);
-    make_input_passthrough(app, app->overlay);
-    make_input_passthrough(app, app->preview);
-}
-
-static bool has_property(App *app, Window w, Atom property) {
-    Atom actual_type;
-    int actual_format;
-    unsigned long nitems;
-    unsigned long bytes_after;
-    unsigned char *prop = NULL;
-
-    int rc = XGetWindowProperty(app->dpy,
-                                w,
-                                property,
-                                0,
-                                0,
-                                False,
-                                AnyPropertyType,
-                                &actual_type,
-                                &actual_format,
-                                &nitems,
-                                &bytes_after,
-                                &prop);
-    if (prop) XFree(prop);
-    return rc == Success && actual_type != None;
-}
-
-static Window find_client_child(App *app, Window w, int depth) {
-    if (depth > 6) return None;
-    if (has_property(app, w, app->atom_wm_state)) return w;
-
-    Window root_ret;
-    Window parent_ret;
-    Window *children = NULL;
-    unsigned int nchildren = 0;
-    if (!XQueryTree(app->dpy, w, &root_ret, &parent_ret, &children, &nchildren)) {
-        return None;
-    }
-
-    Window result = None;
-    for (unsigned int i = 0; i < nchildren; i++) {
-        result = find_client_child(app, children[i], depth + 1);
-        if (result != None) break;
-    }
-    if (children) XFree(children);
-    return result;
-}
-
-static Window resolve_client_window(App *app, Window w) {
-    Window candidate = w;
-    Window root_ret;
-    Window parent_ret;
-    Window *children = NULL;
-    unsigned int nchildren = 0;
-
-    while (candidate != None) {
-        if (has_property(app, candidate, app->atom_wm_state)) return candidate;
-
-        Window child_candidate = find_client_child(app, candidate, 0);
-        if (child_candidate != None) return child_candidate;
-
-        if (!XQueryTree(app->dpy, candidate, &root_ret, &parent_ret, &children, &nchildren)) {
-            break;
-        }
-        if (children) XFree(children);
-        if (parent_ret == root_ret || parent_ret == None) break;
-        candidate = parent_ret;
-    }
-
-    return w;
-}
-
 static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned long *count) {
-    if (property == None) return false;
-
     Atom actual_type;
     int actual_format;
-    unsigned long nitems;
-    unsigned long bytes_after;
+    unsigned long nitems, bytes_after;
     unsigned char *prop = NULL;
 
     if (XGetWindowProperty(app->dpy,
@@ -317,7 +173,7 @@ static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned
         return false;
     }
 
-    if (actual_type != XA_CARDINAL || actual_format != 32 || !prop || nitems == 0) {
+    if (!prop || actual_type != XA_CARDINAL || actual_format != 32 || nitems == 0) {
         if (prop) XFree(prop);
         return false;
     }
@@ -328,19 +184,11 @@ static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned
 }
 
 static Rect get_workarea(App *app) {
-    Rect wa = {
-        .x = 0,
-        .y = 0,
-        .width = DisplayWidth(app->dpy, app->screen),
-        .height = DisplayHeight(app->dpy, app->screen),
-        .valid = true,
-    };
+    Rect wa = {0, 0, DisplayWidth(app->dpy, app->screen), DisplayHeight(app->dpy, app->screen), true};
 
     unsigned long *workareas = NULL;
     unsigned long wa_count = 0;
-    if (!root_cardinal(app, app->atom_net_workarea, &workareas, &wa_count)) {
-        return wa;
-    }
+    if (!root_cardinal(app, app->atom_net_workarea, &workareas, &wa_count)) return wa;
 
     unsigned long desktop = 0;
     unsigned long *desktop_prop = NULL;
@@ -365,144 +213,100 @@ static Rect get_workarea(App *app) {
     XFree(workareas);
 
     if (wa.width <= 0 || wa.height <= 0) {
-        wa.x = 0;
-        wa.y = 0;
-        wa.width = DisplayWidth(app->dpy, app->screen);
-        wa.height = DisplayHeight(app->dpy, app->screen);
+        wa = (Rect){0, 0, DisplayWidth(app->dpy, app->screen), DisplayHeight(app->dpy, app->screen), true};
     }
-
     return wa;
 }
 
-static void normalize_rect(Rect *r) {
-    if (!r->valid) return;
-    if (r->width < 1) r->width = 1;
-    if (r->height < 1) r->height = 1;
-}
+static bool window_has_atom(App *app, Window w, Atom prop, Atom expected) {
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
 
-static Rect rect_full(const Rect *wa, int gap) {
-    Rect r = {
-        .x = wa->x + gap,
-        .y = wa->y + gap,
-        .width = wa->width - (gap * 2),
-        .height = wa->height - (gap * 2),
-        .valid = true,
-    };
-    normalize_rect(&r);
-    return r;
-}
-
-static void split_horizontal(const Rect *wa, int gap, Rect *left, Rect *right) {
-    int inner = gap;
-    int x = wa->x + gap;
-    int y = wa->y + gap;
-    int h = wa->height - (gap * 2);
-    int w = wa->width - (gap * 2) - inner;
-    if (w < 2) w = 2;
-
-    int left_w = w / 2;
-    int right_w = w - left_w;
-
-    *left = (Rect){x, y, left_w, h, true};
-    *right = (Rect){x + left_w + inner, y, right_w, h, true};
-    normalize_rect(left);
-    normalize_rect(right);
-}
-
-static void split_vertical(const Rect *base, int gap, Rect *top, Rect *bottom) {
-    int inner = gap;
-    int h = base->height - inner;
-    if (h < 2) h = 2;
-
-    int top_h = h / 2;
-    int bottom_h = h - top_h;
-
-    *top = (Rect){base->x, base->y, base->width, top_h, true};
-    *bottom = (Rect){base->x, base->y + top_h + inner, base->width, bottom_h, true};
-    normalize_rect(top);
-    normalize_rect(bottom);
-}
-
-static Rect compute_snap_rect(App *app, int pointer_x, int pointer_y) {
-    Rect r = {0};
-    Rect wa = get_workarea(app);
-    int t = app->config.edge_threshold;
-    int top_band = app->config.top_band;
-    int gap = app->config.gap;
-
-    bool at_left = pointer_x <= (wa.x + t);
-    bool at_right = pointer_x >= (wa.x + wa.width - t);
-    bool at_top = pointer_y <= (wa.y + t);
-    bool at_bottom = pointer_y >= (wa.y + wa.height - t);
-    bool in_top_band = pointer_y <= (wa.y + top_band);
-
-    Rect left_half, right_half;
-    split_horizontal(&wa, gap, &left_half, &right_half);
-
-    Rect left_top, left_bottom, right_top, right_bottom;
-    split_vertical(&left_half, gap, &left_top, &left_bottom);
-    split_vertical(&right_half, gap, &right_top, &right_bottom);
-
-    if (at_left && at_top) {
-        r = left_top;
-    } else if (at_right && at_top) {
-        r = right_top;
-    } else if (at_left && at_bottom) {
-        r = left_bottom;
-    } else if (at_right && at_bottom) {
-        r = right_bottom;
-    } else if (at_left) {
-        r = left_half;
-    } else if (at_right) {
-        r = right_half;
-    } else if (at_top || in_top_band) {
-        if (pointer_x < (wa.x + wa.width / 3)) {
-            r = left_half;
-        } else if (pointer_x > (wa.x + (wa.width * 2) / 3)) {
-            r = right_half;
-        } else {
-            r = rect_full(&wa, gap);
-        }
+    if (XGetWindowProperty(app->dpy,
+                           w,
+                           prop,
+                           0,
+                           32,
+                           False,
+                           XA_ATOM,
+                           &actual_type,
+                           &actual_format,
+                           &nitems,
+                           &bytes_after,
+                           &data) != Success) {
+        return false;
     }
 
-    normalize_rect(&r);
-    return r;
-}
-
-static bool rect_equal(const Rect *a, const Rect *b) {
-    return a->valid == b->valid && a->x == b->x && a->y == b->y && a->width == b->width && a->height == b->height;
-}
-
-static void set_overlay_visible(App *app, bool visible) {
-    if (visible) {
-        int sw = DisplayWidth(app->dpy, app->screen);
-        int sh = DisplayHeight(app->dpy, app->screen);
-        XMoveResizeWindow(app->dpy, app->overlay, 0, 0, (unsigned int)sw, (unsigned int)sh);
-        XMapRaised(app->dpy, app->overlay);
-        if (app->dragging && app->current_rect.valid) {
-            XMapRaised(app->dpy, app->preview);
+    bool found = false;
+    if (data && actual_type == XA_ATOM && actual_format == 32) {
+        Atom *atoms = (Atom *)data;
+        for (unsigned long i = 0; i < nitems; i++) {
+            if (atoms[i] == expected) {
+                found = true;
+                break;
+            }
         }
-    } else {
-        XUnmapWindow(app->dpy, app->overlay);
-        XUnmapWindow(app->dpy, app->preview);
     }
+    if (data) XFree(data);
+    return found;
 }
 
-static void show_preview(App *app, const Rect *r) {
-    if (!r->valid || !app->modifier_down) {
-        XUnmapWindow(app->dpy, app->preview);
+static bool is_normal_window(App *app, Window w) {
+    XWindowAttributes attrs;
+    if (!XGetWindowAttributes(app->dpy, w, &attrs)) return false;
+    if (attrs.override_redirect || attrs.map_state != IsViewable) return false;
+
+    if (window_has_atom(app, w, app->atom_net_wm_window_type, app->atom_net_wm_window_type_dock)) return false;
+
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *prop = NULL;
+
+    int rc = XGetWindowProperty(app->dpy,
+                                w,
+                                app->atom_wm_state,
+                                0,
+                                0,
+                                False,
+                                AnyPropertyType,
+                                &actual_type,
+                                &actual_format,
+                                &nitems,
+                                &bytes_after,
+                                &prop);
+    if (prop) XFree(prop);
+    return rc == Success && actual_type != None;
+}
+
+static int get_pref_index(App *app, Window w) {
+    for (int i = 0; i < app->pref_count; i++) {
+        if (app->prefs[i].w == w) return i;
+    }
+    return -1;
+}
+
+static int get_pref_col(App *app, Window w) {
+    int idx = get_pref_index(app, w);
+    if (idx < 0) return -1;
+    return app->prefs[idx].preferred_col;
+}
+
+static void set_pref_col(App *app, Window w, int col) {
+    int idx = get_pref_index(app, w);
+    if (idx >= 0) {
+        app->prefs[idx].preferred_col = col;
         return;
     }
-
-    XMoveResizeWindow(app->dpy, app->preview, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
-    XMapRaised(app->dpy, app->preview);
+    if (app->pref_count >= MAX_MANAGED) return;
+    app->prefs[app->pref_count].w = w;
+    app->prefs[app->pref_count].preferred_col = col;
+    app->pref_count++;
 }
 
 static void clear_maximized_state(App *app, Window w) {
-    if (app->atom_net_wm_state == None || app->atom_net_wm_state_max_horz == None || app->atom_net_wm_state_max_vert == None) {
-        return;
-    }
-
     XEvent ev = {0};
     ev.xclient.type = ClientMessage;
     ev.xclient.window = w;
@@ -513,15 +317,11 @@ static void clear_maximized_state(App *app, Window w) {
     ev.xclient.data.l[2] = app->atom_net_wm_state_max_vert;
     ev.xclient.data.l[3] = 2;
 
-    XSendEvent(app->dpy,
-               app->root,
-               False,
-               SubstructureRedirectMask | SubstructureNotifyMask,
-               &ev);
+    XSendEvent(app->dpy, app->root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
 }
 
-static bool apply_snap_via_ewmh(App *app, Window w, const Rect *r) {
-    if (app->atom_net_moveresize_window == None) return false;
+static void apply_rect(App *app, Window w, const Rect *r) {
+    clear_maximized_state(app, w);
 
     XEvent ev = {0};
     ev.xclient.type = ClientMessage;
@@ -534,114 +334,198 @@ static bool apply_snap_via_ewmh(App *app, Window w, const Rect *r) {
     ev.xclient.data.l[3] = r->width;
     ev.xclient.data.l[4] = r->height;
 
-    Status sent = XSendEvent(app->dpy,
-                             app->root,
-                             False,
-                             SubstructureRedirectMask | SubstructureNotifyMask,
-                             &ev);
-    return sent != 0;
+    XSendEvent(app->dpy, app->root, False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+    XMoveResizeWindow(app->dpy, w, r->x, r->y, (unsigned int)r->width, (unsigned int)r->height);
 }
 
-static void apply_snap(App *app, const Rect *r) {
-    if (!app->target || !r->valid) return;
+static int load_client_list(App *app, Window out[MAX_MANAGED]) {
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
 
-    clear_maximized_state(app, app->target);
-    apply_snap_via_ewmh(app, app->target, r);
-    XMoveResizeWindow(app->dpy,
-                      app->target,
-                      r->x,
-                      r->y,
-                      (unsigned int)r->width,
-                      (unsigned int)r->height);
-    XRaiseWindow(app->dpy, app->target);
-}
-
-static void restore_original_rect(App *app) {
-    if (!app->target || !app->original_rect.valid) return;
-
-    XMoveResizeWindow(app->dpy,
-                      app->target,
-                      app->original_rect.x,
-                      app->original_rect.y,
-                      (unsigned int)app->original_rect.width,
-                      (unsigned int)app->original_rect.height);
-}
-
-static void grab_with_lock_variants(App *app, unsigned int button, unsigned int modifier) {
-    const unsigned int masks[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
-    for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
-        XGrabButton(app->dpy,
-                    button,
-                    modifier | masks[i],
-                    app->root,
-                    True,
-                    ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                    GrabModeAsync,
-                    GrabModeAsync,
-                    None,
-                    None);
-    }
-}
-
-static size_t modifier_keysyms(unsigned int modmask, KeySym out[8]) {
-    if (modmask == ControlMask) {
-        out[0] = XK_Control_L;
-        out[1] = XK_Control_R;
-        return 2;
-    }
-    if (modmask == ShiftMask) {
-        out[0] = XK_Shift_L;
-        out[1] = XK_Shift_R;
-        return 2;
-    }
-    if (modmask == Mod1Mask) {
-        out[0] = XK_Alt_L;
-        out[1] = XK_Alt_R;
-        out[2] = XK_Meta_L;
-        out[3] = XK_Meta_R;
-        return 4;
+    if (XGetWindowProperty(app->dpy,
+                           app->root,
+                           app->atom_net_client_list,
+                           0,
+                           MAX_MANAGED,
+                           False,
+                           XA_WINDOW,
+                           &actual_type,
+                           &actual_format,
+                           &nitems,
+                           &bytes_after,
+                           &data) != Success) {
+        return 0;
     }
 
-    out[0] = XK_Super_L;
-    out[1] = XK_Super_R;
-    out[2] = XK_Hyper_L;
-    out[3] = XK_Hyper_R;
-    return 4;
-}
-
-static void grab_modifier_keys(App *app, unsigned int modmask) {
-    const unsigned int masks[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
-    KeySym syms[8];
-    size_t nsyms = modifier_keysyms(modmask, syms);
-
-    for (size_t k = 0; k < nsyms; k++) {
-        KeyCode code = XKeysymToKeycode(app->dpy, syms[k]);
-        if (code == 0) continue;
-        for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
-            XGrabKey(app->dpy,
-                     (int)code,
-                     masks[i],
-                     app->root,
-                     True,
-                     GrabModeAsync,
-                     GrabModeAsync);
+    int count = 0;
+    if (data && actual_type == XA_WINDOW && actual_format == 32) {
+        Window *wins = (Window *)data;
+        for (unsigned long i = 0; i < nitems && count < MAX_MANAGED; i++) {
+            if (is_normal_window(app, wins[i])) out[count++] = wins[i];
         }
     }
+    if (data) XFree(data);
+    return count;
 }
 
-static bool is_modifier_key(App *app, KeyCode code) {
-    KeySym sym = XkbKeycodeToKeysym(app->dpy, code, 0, 0);
-    if (app->config.modifier == ControlMask) {
-        return sym == XK_Control_L || sym == XK_Control_R;
-    }
-    if (app->config.modifier == ShiftMask) {
-        return sym == XK_Shift_L || sym == XK_Shift_R;
-    }
-    if (app->config.modifier == Mod1Mask) {
-        return sym == XK_Alt_L || sym == XK_Alt_R || sym == XK_Meta_L || sym == XK_Meta_R;
+static void tile_all_windows(App *app) {
+    Window windows[MAX_MANAGED];
+    int count = load_client_list(app, windows);
+    if (count <= 0) return;
+
+    Rect wa = get_workarea(app);
+    int g = app->config.gap;
+    int inner = g;
+
+    int usable_w = wa.width - (2 * g) - (2 * inner);
+    if (usable_w < 3) usable_w = 3;
+
+    int col_w[3] = {usable_w / 3, usable_w / 3, usable_w - (usable_w / 3) * 2};
+    int col_x[3];
+    col_x[0] = wa.x + g;
+    col_x[1] = col_x[0] + col_w[0] + inner;
+    col_x[2] = col_x[1] + col_w[1] + inner;
+
+    Window cols[3][MAX_MANAGED];
+    int ncol[3] = {0, 0, 0};
+
+    for (int i = 0; i < count; i++) {
+        int pref = get_pref_col(app, windows[i]);
+        int target_col = pref;
+        if (target_col < 0 || target_col > 2) {
+            target_col = 0;
+            if (ncol[1] < ncol[target_col]) target_col = 1;
+            if (ncol[2] < ncol[target_col]) target_col = 2;
+        }
+        cols[target_col][ncol[target_col]++] = windows[i];
     }
 
-    return sym == XK_Super_L || sym == XK_Super_R || sym == XK_Hyper_L || sym == XK_Hyper_R;
+    int usable_h_base = wa.height - (2 * g);
+    for (int c = 0; c < 3; c++) {
+        if (ncol[c] == 0) continue;
+
+        int usable_h = usable_h_base - ((ncol[c] - 1) * inner);
+        if (usable_h < ncol[c]) usable_h = ncol[c];
+
+        int y = wa.y + g;
+        int base_h = usable_h / ncol[c];
+        int rem = usable_h % ncol[c];
+
+        for (int i = 0; i < ncol[c]; i++) {
+            int h = base_h + (i < rem ? 1 : 0);
+            Rect r = {col_x[c], y, col_w[c], h, true};
+            apply_rect(app, cols[c][i], &r);
+            y += h + inner;
+        }
+    }
+
+    XSync(app->dpy, False);
+}
+
+static int menu_pick_column(App *app, int root_x, int root_y) {
+    const int w = 210;
+    const int h = 42;
+    int sw = DisplayWidth(app->dpy, app->screen);
+    int sh = DisplayHeight(app->dpy, app->screen);
+
+    if (root_x + w > sw) root_x = sw - w;
+    if (root_y + h > sh) root_y = sh - h;
+    if (root_x < 0) root_x = 0;
+    if (root_y < 0) root_y = 0;
+
+    XSetWindowAttributes a;
+    a.override_redirect = True;
+    a.background_pixel = 0x222222;
+    a.border_pixel = 0xffffff;
+
+    Window menu = XCreateWindow(app->dpy,
+                                app->root,
+                                root_x,
+                                root_y,
+                                (unsigned int)w,
+                                (unsigned int)h,
+                                1,
+                                CopyFromParent,
+                                InputOutput,
+                                CopyFromParent,
+                                CWOverrideRedirect | CWBackPixel | CWBorderPixel,
+                                &a);
+    XSelectInput(app->dpy, menu, ExposureMask | ButtonPressMask);
+    XMapRaised(app->dpy, menu);
+
+    GC gc = DefaultGC(app->dpy, app->screen);
+    int choice = -1;
+
+    for (;;) {
+        XEvent ev;
+        XWindowEvent(app->dpy, menu, ExposureMask | ButtonPressMask, &ev);
+
+        if (ev.type == Expose) {
+            XSetForeground(app->dpy, gc, 0xdddddd);
+            XDrawLine(app->dpy, menu, gc, w / 3, 0, w / 3, h);
+            XDrawLine(app->dpy, menu, gc, (w * 2) / 3, 0, (w * 2) / 3, h);
+            XDrawString(app->dpy, menu, gc, 22, 25, "Left", 4);
+            XDrawString(app->dpy, menu, gc, 88, 25, "Middle", 6);
+            XDrawString(app->dpy, menu, gc, 163, 25, "Right", 5);
+        } else if (ev.type == ButtonPress) {
+            int x = ev.xbutton.x;
+            if (x < w / 3) choice = 0;
+            else if (x < (w * 2) / 3) choice = 1;
+            else choice = 2;
+            break;
+        }
+    }
+
+    XDestroyWindow(app->dpy, menu);
+    XSync(app->dpy, False);
+    return choice;
+}
+
+static void maybe_pick_window_column(App *app) {
+    if (!app->awaiting_pick) return;
+
+    app->awaiting_pick = false;
+    XGrabPointer(app->dpy,
+                 app->root,
+                 True,
+                 ButtonPressMask,
+                 GrabModeAsync,
+                 GrabModeAsync,
+                 None,
+                 None,
+                 CurrentTime);
+
+    XEvent ev;
+    XMaskEvent(app->dpy, ButtonPressMask, &ev);
+
+    XUngrabPointer(app->dpy, CurrentTime);
+
+    Window candidate = ev.xbutton.subwindow;
+        if (candidate == None || !is_normal_window(app, candidate)) return;
+
+    int pick = menu_pick_column(app, ev.xbutton.x_root, ev.xbutton.y_root);
+    if (pick >= 0) {
+        set_pref_col(app, candidate, pick);
+        tile_all_windows(app);
+    }
+}
+
+static void grab_hotkey(App *app) {
+    const unsigned int masks[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
+    KeyCode code = XKeysymToKeycode(app->dpy, app->config.trigger_key);
+    if (code == 0) return;
+
+    for (size_t i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
+        XGrabKey(app->dpy,
+                 (int)code,
+                 app->config.modifier | masks[i],
+                 app->root,
+                 True,
+                 GrabModeAsync,
+                 GrabModeAsync);
+    }
 }
 
 static void usage(const char *prog) {
@@ -677,17 +561,18 @@ int main(int argc, char **argv) {
     app.root = RootWindow(app.dpy, app.screen);
 
     app.atom_wm_state = XInternAtom(app.dpy, "WM_STATE", False);
+    app.atom_net_workarea = XInternAtom(app.dpy, "_NET_WORKAREA", False);
+    app.atom_net_current_desktop = XInternAtom(app.dpy, "_NET_CURRENT_DESKTOP", False);
+    app.atom_net_client_list = XInternAtom(app.dpy, "_NET_CLIENT_LIST", False);
+    app.atom_net_wm_window_type = XInternAtom(app.dpy, "_NET_WM_WINDOW_TYPE", False);
+    app.atom_net_wm_window_type_dock = XInternAtom(app.dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    app.atom_net_moveresize_window = XInternAtom(app.dpy, "_NET_MOVERESIZE_WINDOW", False);
     app.atom_net_wm_state = XInternAtom(app.dpy, "_NET_WM_STATE", False);
     app.atom_net_wm_state_max_horz = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
     app.atom_net_wm_state_max_vert = XInternAtom(app.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
-    app.atom_net_moveresize_window = XInternAtom(app.dpy, "_NET_MOVERESIZE_WINDOW", False);
-    app.atom_net_wm_window_opacity = XInternAtom(app.dpy, "_NET_WM_WINDOW_OPACITY", False);
-    app.atom_net_workarea = XInternAtom(app.dpy, "_NET_WORKAREA", False);
-    app.atom_net_current_desktop = XInternAtom(app.dpy, "_NET_CURRENT_DESKTOP", False);
 
-    init_visuals(&app);
-    grab_with_lock_variants(&app, app.config.button, app.config.modifier);
-    grab_modifier_keys(&app, app.config.modifier);
+    XSelectInput(app.dpy, app.root, SubstructureNotifyMask | KeyPressMask);
+    grab_hotkey(&app);
     XSync(app.dpy, False);
 
     for (;;) {
@@ -695,64 +580,24 @@ int main(int argc, char **argv) {
         XNextEvent(app.dpy, &ev);
 
         if (ev.type == KeyPress) {
-            XKeyEvent *kev = &ev.xkey;
-            if (is_modifier_key(&app, kev->keycode)) {
-                app.modifier_down = true;
-                set_overlay_visible(&app, true);
-                XSync(app.dpy, False);
+            KeySym sym = XkbKeycodeToKeysym(app.dpy, ev.xkey.keycode, 0, 0);
+            if (sym == app.config.trigger_key && (ev.xkey.state & app.config.modifier)) {
+                tile_all_windows(&app);
+                app.awaiting_pick = true;
+                maybe_pick_window_column(&app);
             }
-        } else if (ev.type == KeyRelease) {
-            XKeyEvent *kev = &ev.xkey;
-            if (is_modifier_key(&app, kev->keycode)) {
-                app.modifier_down = false;
-                if (!app.dragging) set_overlay_visible(&app, false);
-                XSync(app.dpy, False);
+        } else if (ev.type == MapNotify) {
+            if (ev.xmap.event == app.root && is_normal_window(&app, ev.xmap.window)) {
+                tile_all_windows(&app);
             }
-        } else if (ev.type == ButtonPress) {
-            XButtonEvent *bev = &ev.xbutton;
-            if (bev->subwindow == None) continue;
-            app.target = resolve_client_window(&app, bev->subwindow);
-            app.dragging = true;
-            app.modifier_down = true;
-            app.live_applied = false;
-            app.current_rect = (Rect){0};
-            XWindowAttributes attrs;
-            if (XGetWindowAttributes(app.dpy, app.target, &attrs)) {
-                app.original_rect = (Rect){attrs.x, attrs.y, attrs.width, attrs.height, true};
-            } else {
-                app.original_rect = (Rect){0};
-            }
-            set_overlay_visible(&app, true);
-            XRaiseWindow(app.dpy, app.target);
-            XSync(app.dpy, False);
-        } else if (ev.type == MotionNotify && app.dragging) {
-            XMotionEvent *mev = &ev.xmotion;
-            Rect next = compute_snap_rect(&app, mev->x_root, mev->y_root);
-            if (!rect_equal(&next, &app.current_rect)) {
-                app.current_rect = next;
-                show_preview(&app, &next);
-                if (next.valid) {
-                    apply_snap(&app, &next);
-                    app.live_applied = true;
-                } else if (app.live_applied) {
-                    restore_original_rect(&app);
-                    app.live_applied = false;
+        } else if (ev.type == DestroyNotify) {
+            for (int i = 0; i < app.pref_count; i++) {
+                if (app.prefs[i].w == ev.xdestroywindow.window) {
+                    app.prefs[i] = app.prefs[app.pref_count - 1];
+                    app.pref_count--;
+                    break;
                 }
-                XSync(app.dpy, False);
             }
-        } else if (ev.type == ButtonRelease && app.dragging) {
-            apply_snap(&app, &app.current_rect);
-            app.dragging = false;
-            app.live_applied = false;
-            app.target = None;
-            app.original_rect = (Rect){0};
-            app.current_rect = (Rect){0};
-            if (!app.modifier_down) {
-                set_overlay_visible(&app, false);
-            } else {
-                XUnmapWindow(app.dpy, app.preview);
-            }
-            XSync(app.dpy, False);
         }
     }
 
