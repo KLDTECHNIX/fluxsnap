@@ -3,9 +3,12 @@ BINDIR ?= $(PREFIX)/bin
 ETCDIR ?= $(PREFIX)/etc
 MANDIR ?= $(PREFIX)/man
 CC ?= cc
+PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2 -pipe
 CFLAGS += -Wall -Wextra -pedantic -std=c11
-LDFLAGS += -lX11
+
+X11_CFLAGS != $(PKG_CONFIG) --cflags x11 2>/dev/null || echo -I$(PREFIX)/include
+X11_LIBS != $(PKG_CONFIG) --libs x11 2>/dev/null || echo -L$(PREFIX)/lib -lX11
 
 PROG = fluxsnap
 SRCS = src/fluxsnap.c
@@ -13,7 +16,7 @@ SRCS = src/fluxsnap.c
 all: $(PROG)
 
 $(PROG): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(X11_CFLAGS) -o $@ $(SRCS) $(X11_LIBS)
 
 install: $(PROG)
 	install -d $(DESTDIR)$(BINDIR)

@@ -13,7 +13,10 @@
 
 ## Build
 
+Install X11 headers/libraries and pkgconf before building:
+
 ```sh
+doas pkg install libX11 pkgconf
 make
 ```
 
