@@ -42,6 +42,7 @@ typedef struct {
     KeySym trigger_key;
     char trigger_key_name[64];
     int gap;
+    int band_top, band_bottom, band_left, band_right;
     Zone zones[MAX_ZONES];
     int zone_count;
 } Config;
@@ -205,6 +206,18 @@ static void load_config_file(Config *cfg, const char *path) {
         } else if (strcasecmp(key, "gap") == 0) {
             long v = strtol(value, NULL, 10);
             if (v >= 0 && v <= 300) cfg->gap = (int)v;
+        } else if (strcasecmp(key, "top_band") == 0) {
+            long v = strtol(value, NULL, 10);
+            if (v >= 0 && v <= 4000) cfg->band_top = (int)v;
+        } else if (strcasecmp(key, "bottom_band") == 0) {
+            long v = strtol(value, NULL, 10);
+            if (v >= 0 && v <= 4000) cfg->band_bottom = (int)v;
+        } else if (strcasecmp(key, "left_band") == 0) {
+            long v = strtol(value, NULL, 10);
+            if (v >= 0 && v <= 4000) cfg->band_left = (int)v;
+        } else if (strcasecmp(key, "right_band") == 0) {
+            long v = strtol(value, NULL, 10);
+            if (v >= 0 && v <= 4000) cfg->band_right = (int)v;
         } else if (strcasecmp(key, "zone") == 0) {
             if (!zone_reset) {
                 cfg->zone_count = 0;
@@ -712,6 +725,28 @@ static void tile_all_windows(App *app) {
     Rect mons[MAX_MONITORS] = {0};
     int nmon = get_visible_monitors(app, wa, mons);
     apply_dock_struts(app, mons, nmon);
+
+    /* Apply explicit band reservations from config.  These act as a floor:
+     * if strut detection already reserved more space on a side, no change;
+     * if strut detection missed the toolbar (common with some Fluxbox builds),
+     * the configured band takes over.  top_band/bottom_band/left_band/right_band
+     * are in pixels from the respective screen edge. */
+    {
+        const Config *c = &app->config;
+        if (c->band_top || c->band_bottom || c->band_left || c->band_right) {
+            int sw = DisplayWidth(app->dpy, app->screen);
+            int sh = DisplayHeight(app->dpy, app->screen);
+            Strut band = {
+                c->band_left, c->band_right, c->band_top, c->band_bottom,
+                0, sh - 1,  /* left  start_y / end_y */
+                0, sh - 1,  /* right start_y / end_y */
+                0, sw - 1,  /* top   start_x / end_x */
+                0, sw - 1,  /* bottom start_x / end_x */
+            };
+            for (int m = 0; m < nmon; m++)
+                apply_strut_to_monitor(&mons[m], &band, sw, sh);
+        }
+    }
 
     for (int m = 0; m < nmon; m++) {
         ZoneBucket buckets[MAX_ZONES] = {0};
