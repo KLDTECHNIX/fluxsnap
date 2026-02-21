@@ -273,8 +273,6 @@ static bool root_cardinal(App *app, Atom property, unsigned long **out, unsigned
     return true;
 }
 
-static bool window_has_atom(App *app, Window w, Atom prop, Atom expected);
-
 /* Read _NET_WM_STRUT_PARTIAL (12 values) or _NET_WM_STRUT (4 values) from a
  * dock window.  Returns false if neither property exists or all values are 0. */
 static bool get_window_strut(App *app, Window w, Strut *out) {
@@ -359,9 +357,11 @@ static void apply_strut_to_monitor(Rect *mon, const Strut *s, int sw, int sh) {
     }
 }
 
-/* Walk all root-window children, find docks, and clip every monitor rect to
- * exclude their reserved strut areas.  This handles cases where the WM has not
- * updated _NET_WORKAREA to reflect the toolbar position. */
+/* Walk all root-window children and clip every monitor rect to exclude the
+ * reserved strut areas of any window that declares one.  We do not filter by
+ * _NET_WM_WINDOW_TYPE_DOCK because Fluxbox's toolbar does not always set that
+ * atom — but it always sets _NET_WM_STRUT / _NET_WM_STRUT_PARTIAL.  Windows
+ * without a strut property are skipped by get_window_strut() returning false. */
 static void apply_dock_struts(App *app, Rect mons[], int nmon) {
     int sw = DisplayWidth(app->dpy, app->screen);
     int sh = DisplayHeight(app->dpy, app->screen);
@@ -374,11 +374,6 @@ static void apply_dock_struts(App *app, Rect mons[], int nmon) {
         return;
 
     for (unsigned int i = 0; i < nchildren; i++) {
-        if (!window_has_atom(app, children[i],
-                             app->atom_net_wm_window_type,
-                             app->atom_net_wm_window_type_dock))
-            continue;
-
         Strut strut;
         if (!get_window_strut(app, children[i], &strut))
             continue;
